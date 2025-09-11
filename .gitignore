@@ -1,0 +1,10 @@
+.DS_Store
+/data
+/outputs*
+__pycache__
+.ipynb_checkpoints
+.pytest_cache
+.venv
+.codacy
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
