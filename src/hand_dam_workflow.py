@@ -19,11 +19,9 @@ import numpy as np
 import geopandas as gpd
 import pandas as pd
 from pathlib import Path
-from osgeo import gdal, ogr, osr
 import rasterio
-from rasterio.mask import mask
 from rasterio.features import rasterize
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+
 
 # Configure logging
 logging.basicConfig(
