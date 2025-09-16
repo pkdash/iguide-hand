@@ -354,10 +354,10 @@ class HandDamWorkflow:
         """Run TauDEM Phase 4: HAND calculation."""
         logger.info("Running TauDEM Phase 4: HAND calculation...")
 
-        # Contributing area with weight grid
+        # Contributing area with weight grid (for HAND calculation)
         self.run_taudem_command(
             "mpiexec -n 8 aread8 -p p.tif -ad8 src.tif -wg damloc.tif -nc",
-            "Contributing area with weight grid"
+            "Contributing area with weight grid for HAND"
         )
 
         # HAND calculation
@@ -412,8 +412,8 @@ class HandDamWorkflow:
         # Read stream network shapefile
         net_gdf = gpd.read_file(net_shp)
 
-        # Filter rows where DSNODEID == -1 (outlet nodes)
-        filtered_gdf = net_gdf[net_gdf['DSNODEID'] == -1]
+        # Filter rows where DSNODEID == 0 (internal nodes)
+        filtered_gdf = net_gdf[net_gdf['DSNODEID'] == 0]
 
         # Create catchment list dataframe
         catchlist_data = []
