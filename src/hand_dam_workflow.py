@@ -35,7 +35,8 @@ class HandDamWorkflow:
     """Main class for HAND dam workflow processing."""
 
     def __init__(self, taudem_path="$HOME/taudem", output_dir="outputs",
-                 data_dir="data", clipped_dir="outputs/clipped"):
+                 data_dir="data", clipped_dir="outputs/clipped",
+                 outlets_on_reaches="Outlets2_utm.shp"):
         """
         Initialize the workflow.
 
@@ -44,11 +45,13 @@ class HandDamWorkflow:
             output_dir: Output directory for results
             data_dir: Input data directory
             clipped_dir: Directory containing clipped rasters
+            outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
         """
         self.taudem_path = os.path.expanduser(taudem_path)
         self.output_dir = Path(output_dir)
         self.data_dir = Path(data_dir)
         self.clipped_dir = Path(clipped_dir)
+        self.outlets_on_reaches = outlets_on_reaches
 
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
@@ -237,28 +240,31 @@ class HandDamWorkflow:
 
         logger.info(f"Created projected dam location: {output_shp}")
 
-    def create_outlets2_utm(self):
-        """Create outlets2_utm.shp from outlet.shp using dam location coordinate system."""
-        logger.info("Creating outlets2_utm.shp from outlet.shp...")
+    def copy_outlets_on_reaches(self):
+        """Copy user-supplied outlets2_utm.shp from data directory to outputs directory."""
+        logger.info(f"Copying user-supplied outlets file: {self.outlets_on_reaches}")
 
-        outlet_shp = self.data_dir / "outlet.shp"
-        dam_shp = self.data_dir / "mountain_dell_dam_location.shp"
+        # Source file in data directory
+        source_shp = self.data_dir / self.outlets_on_reaches
+
+        # Check if source file exists
+        if not source_shp.exists():
+            raise FileNotFoundError(f"User-supplied outlets file not found: {source_shp}")
+
+        # Destination file in outputs directory
         output_shp = self.output_dir / "outlets2_utm.shp"
 
-        # Read outlet shapefile
-        outlet_gdf = gpd.read_file(outlet_shp)
+        # Copy all shapefile components
+        shutil.copy2(source_shp, output_shp)
 
-        # Get dam location CRS
-        dam_gdf = gpd.read_file(dam_shp)
-        target_crs = dam_gdf.crs
+        # Copy associated files (.dbf, .prj, .shx, etc.)
+        for ext in ['.dbf', '.prj', '.shx', '.cpg', '.sbn', '.sbx']:
+            source_file = source_shp.with_suffix(ext)
+            if source_file.exists():
+                output_file = output_shp.with_suffix(ext)
+                shutil.copy2(source_file, output_file)
 
-        # Reproject outlet to dam CRS
-        outlet_projected = outlet_gdf.to_crs(target_crs)
-
-        # Save as outlets2_utm.shp
-        outlet_projected.to_file(output_shp)
-
-        logger.info(f"Created outlets2_utm.shp: {output_shp}")
+        logger.info(f"Copied outlets file to: {output_shp}")
 
     def create_dam_location_raster(self):
         """Create binary raster from outlet points."""
@@ -455,7 +461,7 @@ class HandDamWorkflow:
             # Phase 1: Data preparation
             self.copy_clipped_rasters()
             self.copy_input_files()
-            self.create_outlets2_utm()
+            self.copy_outlets_on_reaches()
 
             # Phase 2: Flow direction processing
             self.create_flow_direction_mask()
@@ -521,6 +527,12 @@ def main():
     )
 
     parser.add_argument(
+        "--outlets-on-reaches",
+        default="Outlets2_utm.shp",
+        help="Name of user-supplied outlets shapefile in data directory (default: Outlets2_utm.shp)"
+    )
+
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging"
@@ -537,7 +549,8 @@ def main():
         taudem_path=args.taudem_path,
         output_dir=args.output_dir,
         data_dir=args.data_dir,
-        clipped_dir=args.clipped_dir
+        clipped_dir=args.clipped_dir,
+        outlets_on_reaches=args.outlets_on_reaches
     )
 
     workflow.run_workflow()
