@@ -12,6 +12,7 @@ Author: Generated from HandDamWorkflow.ipynb
 import os
 import sys
 import shutil
+import shlex
 import subprocess
 import argparse
 import logging
@@ -67,17 +68,11 @@ class HandDamWorkflow:
             logger.info(f"Added TauDEM path: {self.taudem_path}")
 
         # Check if TauDEM is available
-        try:
-            result = subprocess.run(
-                "which mpiexec",
-                shell=True,
-                capture_output=True,
-                text=True
-            )
-            if result.returncode != 0:
-                logger.warning("mpiexec not found in PATH. TauDEM commands may fail.")
-        except Exception:
-            logger.warning("Could not verify TauDEM installation.")
+        mpiexec_path = shutil.which("mpiexec")
+        if mpiexec_path is None:
+            logger.warning("mpiexec not found in PATH. TauDEM commands may fail.")
+        else:
+            logger.info(f"Found mpiexec at: {mpiexec_path}")
 
     def run_taudem_command(self, command, description="TauDEM command"):
         """
@@ -88,10 +83,11 @@ class HandDamWorkflow:
             description: Description for logging
         """
         logger.info(f"Running {description}: {command}")
+        cmd_list = shlex.split(command)
         try:
             result = subprocess.run(
-                command,
-                shell=True,
+                cmd_list,
+                shell=False,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -102,7 +98,7 @@ class HandDamWorkflow:
             if result.stderr:
                 logger.warning(f"Warnings: {result.stderr}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"TauDEM command failed: {command}")
+            logger.error(f"TauDEM command failed: {' '.join(cmd_list)}")
             logger.error(f"Error: {e.stderr}")
             sys.exit(1)
 
