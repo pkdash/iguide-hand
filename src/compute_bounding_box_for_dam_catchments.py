@@ -15,15 +15,18 @@ This script:
 import os
 import sys
 import argparse
+import subprocess
 import geopandas as gpd
 import pandas as pd
 import numpy as np
 from pyproj import CRS
 import logging
 from pathlib import Path
+from osgeo import gdal
 
 # Logger will be configured in main()
 logger = logging.getLogger(__name__)
+
 
 class HUC12BoundingBoxCalculator:
     """Calculate bounding box for downstream HUC12s from dam location, and optionally clip NHDPlus rasters to that bounding box."""
@@ -75,7 +78,6 @@ class HUC12BoundingBoxCalculator:
         except ImportError:
             logger.error("rasterio not available, using GDAL to get projection")
             # Fallback to GDAL
-            from osgeo import gdal
             dataset = gdal.Open(self.ref_projection_raster_path)
             if dataset:
                 self.target_crs = CRS.from_wkt(dataset.GetProjection())
@@ -274,7 +276,6 @@ class HUC12BoundingBoxCalculator:
     def get_raster_compression(self, raster_path):
         """Get compression settings from input raster using GDAL."""
         try:
-            from osgeo import gdal
             dataset = gdal.Open(str(raster_path))
             if dataset is None:
                 logger.warning(f"Could not open raster: {raster_path}")
@@ -372,7 +373,6 @@ class HUC12BoundingBoxCalculator:
                 cmd_parts.extend([str(raster_path), str(output_path)])
 
                 # Execute gdalwarp command
-                import subprocess
                 subprocess.run(
                     cmd_parts,
                     capture_output=True,
