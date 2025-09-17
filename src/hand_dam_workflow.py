@@ -250,15 +250,12 @@ class HandDamWorkflow:
         # Destination file in outputs directory
         output_shp = self.output_dir / "outlets2_utm.shp"
 
-        # Copy all shapefile components
-        shutil.copy2(source_shp, output_shp)
-
-        # Copy associated files (.dbf, .prj, .shx, etc.)
-        for ext in ['.dbf', '.prj', '.shx', '.cpg', '.sbn', '.sbx']:
-            source_file = source_shp.with_suffix(ext)
-            if source_file.exists():
-                output_file = output_shp.with_suffix(ext)
-                shutil.copy2(source_file, output_file)
+        # Copy the shapefile and all its associated sidecar files
+        # by finding all files with the same stem.
+        source_stem = source_shp.stem
+        for source_file in source_shp.parent.glob(f"{source_stem}.*"):
+            dest_file = self.output_dir / source_file.name
+            shutil.copy2(source_file, dest_file)
 
         logger.info(f"Copied outlets file to: {output_shp}")
 
