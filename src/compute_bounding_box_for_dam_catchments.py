@@ -7,7 +7,7 @@ This script:
 2. Finds the starting HUC12 containing the dam
 3. Traverses downstream HUC12s using connectivity data
 4. Calculates cumulative distance using sqrt(area) formula
-5. Stops at 100km distance or CLOSED BASIN
+5. Stops at 100km distance or CLOSED BASIN, whichever comes first
 6. Computes bounding box in reference raster projection
 7. Optionally clips all NHDPlus rasters in a directory to the bounding box
 """
@@ -308,7 +308,7 @@ class HUC12BoundingBoxCalculator:
             return ["COMPRESS=LZW", "TILED=YES"]  # Default fallback
 
     def clip_rasters(self, bounding_box):
-        """Clip all discovered rasters using the calculated bounding box."""
+        """Clip all discovered rasters using the calculated bounding box (exact values, no resampling)."""
         if not bounding_box:
             logger.error("No bounding box available for raster clipping")
             return
@@ -357,22 +357,25 @@ class HUC12BoundingBoxCalculator:
                 # Get compression settings from input raster
                 creation_options = self.get_raster_compression(raster_path)
 
-                # Build gdalwarp command
+                # Build gdal_translate command
                 cmd_parts = [
-                    "gdalwarp",
-                    "-te", str(minx), str(miny), str(maxx), str(maxy),
-                    "-te_srs", str(self.target_crs),
-                    "-overwrite"
+                    "gdal_translate",
+                    "-projwin", str(minx), str(maxy), str(maxx), str(miny),  # note Y order
+                    "-of", "GTiff",  # output format
+                    "-co", "TILED=YES"  # ensure tiling for efficiency
                 ]
 
-                # Add creation options
+                # Add creation options safely
                 for option in creation_options:
+                    if "=" not in option:
+                        logger.warning(f"Invalid creation option (skipped): {option}")
+                        continue
                     cmd_parts.extend(["-co", option])
 
-                # Add input and output paths
+                # Input and output paths
                 cmd_parts.extend([str(raster_path), str(output_path)])
 
-                # Execute gdalwarp command
+                # Execute gdal_translate command
                 subprocess.run(
                     cmd_parts,
                     capture_output=True,
@@ -392,7 +395,7 @@ class HUC12BoundingBoxCalculator:
                     raise FileNotFoundError(f"Output file not created: {output_path}")
 
             except subprocess.CalledProcessError as e:
-                error_msg = f"gdalwarp failed for {raster_path.name}: {e.stderr}"
+                error_msg = f"gdal_translate failed for {raster_path.name}: {e.stderr}"
                 logger.error(error_msg)
                 self.failed_rasters.append({
                     'input': raster_path.name,
