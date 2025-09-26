@@ -3,10 +3,8 @@
 HAND Dam Workflow Implementation
 
 This script implements the Height Above Nearest Drainage (HAND) inundation mapping
-workflow for aging dams, converting the Jupyter notebook workflow to a standalone
-Python script without ArcPy dependencies.
+workflow for aging dams.
 
-Author: Generated from HandDamWorkflow.ipynb
 """
 
 import os
