@@ -46,13 +46,15 @@ Before installing Python dependencies, ensure you have the following external to
 
    ```bash
    # On macOS/Linux:
-   python3 -m venv .venv
+   python3 -m venv .venv --system-site-packages
    ```
 
    ```bash
    # On Windows:
-   python -m venv .venv
+   python -m venv .venv --system-site-packages
    ```
+
+   NOTE: The `--system-site-packages` flag is important to ensure that the virtual environment has access to the external tools (e.g., GDAL) installed on the system.
 
 2. **Activate the virtual environment**:
 
