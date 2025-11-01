@@ -67,6 +67,10 @@ class HUC12BoundingBoxCalculator:
         # Raster clipping results
         self.clipped_rasters = []
         self.failed_rasters = []
+        self.huc12_key_name_huc12 = 'huc12'
+        self.huc12_key_name_name = 'name'
+        self.huc12_key_name_areasqkm = 'areasqkm'
+        self.huc12_key_name_tohuc = 'tohuc'
 
     def load_target_projection(self):
         """Load target projection from reference raster."""
@@ -96,7 +100,11 @@ class HUC12BoundingBoxCalculator:
             self.dam_location = self.dam_location.to_crs(self.target_crs)
 
         logger.info(f"Dam location loaded: {len(self.dam_location)} features")
-        logger.info(f"Dam coordinates: {self.dam_location.geometry.iloc[0].x:.2f}, {self.dam_location.geometry.iloc[0].y:.2f}")
+        logger.info(
+            f"Dam coordinates: "
+            f"{self.dam_location.geometry.iloc[0].x:.2f}, "
+            f"{self.dam_location.geometry.iloc[0].y:.2f}"
+        )
 
     def load_huc12_data(self):
         """Load HUC12 data from geodatabase."""
@@ -110,8 +118,28 @@ class HUC12BoundingBoxCalculator:
 
         logger.info(f"HUC12 data loaded: {len(self.huc12_data)} features")
 
+        # Set the key names from the first row of HUC4 gdb data (WBDHU12 layer)
+        # Not sure why the keys are not all lowercase for different HUC4 gdb data sets
+        first_row = self.huc12_data.iloc[0]
+        key_reset_count = 0
+        for key in first_row.keys():
+            if 'huc12' == key.lower():
+                self.huc12_key_name_huc12 = key
+                key_reset_count += 1
+            elif 'name' == key.lower():
+                self.huc12_key_name_name = key
+                key_reset_count += 1
+            elif 'areasqkm' == key.lower():
+                self.huc12_key_name_areasqkm = key
+                key_reset_count += 1
+            elif 'tohuc' == key.lower():
+                self.huc12_key_name_tohuc = key
+                key_reset_count += 1
+            if key_reset_count == 4:
+                break
+
         # Create lookup dictionary for faster access
-        self.huc12_lookup = {row['huc12']: idx for idx, row in self.huc12_data.iterrows()}
+        self.huc12_lookup = {row[self.huc12_key_name_huc12]: idx for idx, row in self.huc12_data.iterrows()}
         logger.info("HUC12 lookup dictionary created")
 
     def find_starting_huc12(self):
@@ -129,23 +157,26 @@ class HUC12BoundingBoxCalculator:
             distances = self.huc12_data.geometry.distance(dam_point)
             nearest_idx = distances.idxmin()
             starting_huc12 = self.huc12_data.loc[nearest_idx]
-            logger.info(f"Nearest HUC12: {starting_huc12['huc12']} (distance: {distances.iloc[nearest_idx]:.2f}m)")
+            logger.info(
+                f"Nearest HUC12: {starting_huc12[self.huc12_key_name_huc12]} "
+                f"(distance: {distances.iloc[nearest_idx]:.2f}m)"
+            )
         elif len(containing_huc12s) == 1:
             starting_huc12 = containing_huc12s.iloc[0]
-            logger.info(f"Dam contained in HUC12: {starting_huc12['huc12']}")
+            logger.info(f"Dam contained in HUC12: {starting_huc12[self.huc12_key_name_huc12]}")
         else:
             # Multiple containing HUC12s (shouldn't happen but handle it)
             logger.warning(f"Dam contained in multiple HUC12s ({len(containing_huc12s)}), using first one")
             starting_huc12 = containing_huc12s.iloc[0]
-            logger.info(f"Selected HUC12: {starting_huc12['huc12']}")
+            logger.info(f"Selected HUC12: {starting_huc12[self.huc12_key_name_huc12]}")
 
         return starting_huc12
 
     def calculate_huc12_distance(self, huc12_row):
         """Calculate distance contribution of a HUC12 using sqrt(area) formula."""
-        area_sqkm = huc12_row['areasqkm']
+        area_sqkm = huc12_row[self.huc12_key_name_areasqkm]
         if pd.isna(area_sqkm) or area_sqkm <= 0:
-            logger.warning(f"Invalid area for HUC12 {huc12_row['huc12']}: {area_sqkm}")
+            logger.warning(f"Invalid area for HUC12 {huc12_row[self.huc12_key_name_huc12]}: {area_sqkm}")
             return 0.0
         return np.sqrt(area_sqkm)
 
@@ -161,7 +192,7 @@ class HUC12BoundingBoxCalculator:
         visited_huc12s = set()  # Prevent infinite loops
 
         while current_huc12 is not None:
-            current_huc12_id = current_huc12['huc12']
+            current_huc12_id = current_huc12[self.huc12_key_name_huc12]
 
             # Check for infinite loop
             if current_huc12_id in visited_huc12s:
@@ -175,18 +206,23 @@ class HUC12BoundingBoxCalculator:
 
             # Check if adding this HUC12 would exceed distance limit
             if self.total_distance + distance_contribution > self.max_distance_km:
-                logger.info(f"Distance limit ({self.max_distance_km} km) would be exceeded, stopping at HUC12 {current_huc12_id}")
+                logger.info(
+                    f"Distance limit ({self.max_distance_km} km) would be exceeded, "
+                    f"stopping at HUC12 {current_huc12_id}"
+                )
                 break
 
             # Add current HUC12 to downstream list
             self.downstream_huc12s.append(current_huc12)
             self.total_distance += distance_contribution
 
-            logger.info(f"Added HUC12 {current_huc12_id}: {current_huc12['name'][:50]}... "
-                       f"(distance: +{distance_contribution:.2f} km, total: {self.total_distance:.2f} km)")
+            logger.info(
+                f"Added HUC12 {current_huc12_id}: {current_huc12[self.huc12_key_name_name][:50]}... "
+                f"(distance: +{distance_contribution:.2f} km, total: {self.total_distance:.2f} km)"
+            )
 
             # Check if this is a terminal basin
-            tohuc = current_huc12['tohuc']
+            tohuc = current_huc12[self.huc12_key_name_tohuc]
             if pd.isna(tohuc) or tohuc == 'CLOSED BASIN' or tohuc == '':
                 logger.info(f"Reached terminal basin at HUC12 {current_huc12_id}")
                 break
@@ -199,7 +235,11 @@ class HUC12BoundingBoxCalculator:
                 logger.warning(f"Next HUC12 {tohuc} not found in dataset, stopping")
                 break
 
-        logger.info(f"Traversal complete: {len(self.downstream_huc12s)} HUC12s, total distance: {self.total_distance:.2f} km")
+        logger.info(
+            f"Traversal complete: {len(self.downstream_huc12s)} HUC12s, "
+            f"total distance: {self.total_distance:.2f} km"
+        )
+
 
     def calculate_bounding_box(self):
         """Calculate bounding box of all downstream HUC12s."""
@@ -411,7 +451,10 @@ class HUC12BoundingBoxCalculator:
                 })
 
         # Log summary
-        logger.info(f"Raster clipping complete: {len(self.clipped_rasters)} successful, {len(self.failed_rasters)} failed")
+        logger.info(
+            f"Raster clipping complete: {len(self.clipped_rasters)} successful, "
+            f"{len(self.failed_rasters)} failed"
+        )
 
         if self.clipped_rasters:
             total_size = sum(r['size_mb'] for r in self.clipped_rasters)
@@ -470,7 +513,10 @@ class HUC12BoundingBoxCalculator:
             f.write(f"  Number of downstream HUC12s: {len(self.downstream_huc12s)}\n")
             f.write(f"  Total distance traveled: {self.total_distance:.2f} km\n")
             if self.clipped_rasters or self.failed_rasters:
-                f.write(f"  Clipped rasters: {len(self.clipped_rasters)} successful, {len(self.failed_rasters)} failed\n")
+                f.write(
+                    f"  Clipped rasters: {len(self.clipped_rasters)} successful, "
+                    f"{len(self.failed_rasters)} failed\n"
+                )
             f.write("\n")
 
             if bounding_box:
@@ -506,11 +552,11 @@ class HUC12BoundingBoxCalculator:
             f.write("-" * 25 + "\n")
             for i, huc12 in enumerate(self.downstream_huc12s, 1):
                 distance_contrib = self.calculate_huc12_distance(huc12)
-                f.write(f"{i:2d}. HUC12: {huc12['huc12']} | "
-                       f"Name: {huc12['name'][:40]:<40} | "
-                       f"Area: {huc12['areasqkm']:8.2f} km² | "
+                f.write(f"{i:2d}. HUC12: {huc12[self.huc12_key_name_name]} | "
+                       f"Name: {huc12[self.huc12_key_name_name][:40]:<40} | "
+                       f"Area: {huc12[self.huc12_key_name_areasqkm]:8.2f} km² | "
                        f"Distance: {distance_contrib:6.2f} km | "
-                       f"ToHUC: {huc12['tohuc']}\n")
+                       f"ToHUC: {huc12[self.huc12_key_name_tohuc]}\n")
 
         logger.info(f"Processing report saved to: {report_file}")
 
