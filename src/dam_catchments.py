@@ -626,24 +626,28 @@ def parse_arguments():
     parser.add_argument(
         "--dam-shapefile",
         default="data/mountain_dell_dam_location.shp",
+        # default="data/beach_city_dam/beach_city_dam_location.shp",
         help="Path to dam location shapefile (default: %(default)s)"
     )
 
     parser.add_argument(
         "--huc12-gdb",
         default="data/NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb",
+        # default="data/NHDPLUS_H_0503_HU4_GDB/NHDPLUS_H_0503_HU4_GDB.gdb",
         help="Path to HUC12 geodatabase (default: %(default)s)"
     )
 
     parser.add_argument(
         "--ref-projection-raster",
         default="data/NHDPLUS_H_1602_HU4_20220412_RASTER/hydrodem.tif",
+        # default="data/NHDPLUS_H_0503_HU4_RASTER/hydrodem.tif",
         help="Path to reference raster for target projection (default: %(default)s)"
     )
 
     parser.add_argument(
         "--output-dir",
         default="outputs",
+        # default="outputs_beach_city",
         help="Output directory for results (default: %(default)s)"
     )
 
@@ -670,24 +674,28 @@ def parse_arguments():
     parser.add_argument(
         "--clip-rasters",
         action="store_true",
+        default=True,
         help="Enable raster clipping using calculated bounding box"
     )
 
     parser.add_argument(
         "--raster-dir",
         default="data/NHDPLUS_H_1602_HU4_20220412_RASTER", # Default raster directory
+        # default="data/NHDPLUS_H_0503_HU4_RASTER", # Default raster directory
         help="Directory containing rasters to clip (default: %(default)s)"
     )
 
     parser.add_argument(
         "--clipped-dir",
         default="clipped",
+        # default="clipped_beach_city",
         help="Subdirectory name within output-dir for clipped rasters (default: %(default)s)"
     )
 
     parser.add_argument(
         "--buffer",
         type=float,
+        default=4000,
         help="Buffer distance in meters to add around bounding box (optional)"
     )
 
