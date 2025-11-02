@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 class HUC12BoundingBoxCalculator:
-    """Calculate bounding box for downstream HUC12s from dam location, and optionally clip NHDPlus rasters to that bounding box."""
+    """
+    Calculate bounding box for downstream HUC12s from dam location, and optionally clip NHDPlus
+    rasters to that bounding box.
+    """
 
     def __init__(self, dam_shapefile, huc12_gdb_path, ref_projection_raster_path, output_dir="outputs",
                  raster_dir=None, clipped_dir="clipped", buffer_distance=None):
