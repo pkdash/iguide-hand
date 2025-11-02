@@ -9,11 +9,10 @@ data and hydraulic geometry calculations.
 
 import os
 import sys
-import shlex
-import subprocess
 import argparse
 import logging
 from pathlib import Path
+from utils import setup_taudem_path, run_taudem_command
 
 
 # Configure logging
@@ -40,17 +39,10 @@ class DamInundationAnalysis:
         self.output_dir = Path(output_dir)
 
         # Set up TauDEM PATH
-        self.setup_taudem_path()
+        setup_taudem_path(self.taudem_path)
 
         # Verify required input files exist
         self.verify_inputs()
-
-    def setup_taudem_path(self):
-        """Add TauDEM to system PATH."""
-        current_path = os.environ.get("PATH", "")
-        if self.taudem_path not in current_path:
-            os.environ["PATH"] = f"{self.taudem_path}:{current_path}"
-            logger.info(f"Added TauDEM path: {self.taudem_path}")
 
     def verify_inputs(self):
         """Verify that all required input files exist."""
@@ -84,25 +76,7 @@ class DamInundationAnalysis:
             command: Command string to execute
             description: Description for logging
         """
-        logger.info(f"Running {description}: {command}")
-        cmd_list = shlex.split(command)
-        try:
-            result = subprocess.run(
-                cmd_list,
-                shell=False,
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=self.output_dir
-            )
-            if result.stdout:
-                logger.info(f"Output: {result.stdout}")
-            if result.stderr:
-                logger.warning(f"Warnings: {result.stderr}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"TauDEM command failed: {' '.join(cmd_list)}")
-            logger.error(f"Error: {e.stderr}")
-            sys.exit(1)
+        run_taudem_command(command, description, cwd=self.output_dir)
 
     def run_hydraulic_geometry(self):
         """Run hydraulic geometry calculation."""

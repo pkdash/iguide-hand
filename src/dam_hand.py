@@ -3,15 +3,13 @@
 HAND Dam Workflow Implementation
 
 This script implements the Height Above Nearest Drainage (HAND) inundation mapping
-workflow for aging dams.
+workflow for aging dams
 
 """
 
 import os
 import sys
 import shutil
-import shlex
-import subprocess
 import argparse
 import logging
 import numpy as np
@@ -20,6 +18,7 @@ import pandas as pd
 from pathlib import Path
 import rasterio
 from rasterio.features import rasterize
+from utils import setup_taudem_path, run_taudem_command
 
 
 # Configure logging
@@ -56,21 +55,7 @@ class HandDamWorkflow:
         self.output_dir.mkdir(exist_ok=True)
 
         # Set up TauDEM PATH
-        self.setup_taudem_path()
-
-    def setup_taudem_path(self):
-        """Add TauDEM to system PATH."""
-        current_path = os.environ.get("PATH", "")
-        if self.taudem_path not in current_path:
-            os.environ["PATH"] = f"{self.taudem_path}:{current_path}"
-            logger.info(f"Added TauDEM path: {self.taudem_path}")
-
-        # Check if TauDEM is available
-        mpiexec_path = shutil.which("mpiexec")
-        if mpiexec_path is None:
-            logger.warning("mpiexec not found in PATH. TauDEM commands may fail.")
-        else:
-            logger.info(f"Found mpiexec at: {mpiexec_path}")
+        setup_taudem_path(self.taudem_path)
 
     def run_taudem_command(self, command, description="TauDEM command"):
         """
@@ -80,25 +65,7 @@ class HandDamWorkflow:
             command: Command string to execute
             description: Description for logging
         """
-        logger.info(f"Running {description}: {command}")
-        cmd_list = shlex.split(command)
-        try:
-            result = subprocess.run(
-                cmd_list,
-                shell=False,
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=self.output_dir
-            )
-            if result.stdout:
-                logger.info(f"Output: {result.stdout}")
-            if result.stderr:
-                logger.warning(f"Warnings: {result.stderr}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"TauDEM command failed: {' '.join(cmd_list)}")
-            logger.error(f"Error: {e.stderr}")
-            sys.exit(1)
+        run_taudem_command(command, description, cwd=self.output_dir)
 
     def copy_clipped_rasters(self):
         """Copy all clipped rasters from clipped directory to output directory."""
