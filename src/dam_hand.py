@@ -428,22 +428,6 @@ class HandDamWorkflow:
 
         logger.info(f"Created catchment list: {output_csv}")
 
-    def run_inundation_analysis(self):
-        """Run final inundation analysis."""
-        logger.info("Running inundation analysis...")
-
-        # Hydraulic geometry calculation
-        self.run_taudem_command(
-            "mpiexec -n 4 catchhydrogeo -hand hand.tif -catch w2.tif -catchlist catchlist.csv -slp slp.tif -h stage.txt -table hydroprop.csv",
-            "Hydraulic geometry calculation"
-        )
-
-        # Inundation depth calculation
-        self.run_taudem_command(
-            "mpiexec -n 4 inundepth -hand hand.tif -catch w2.tif -fc forecast.csv -hp hydroprop.csv -inun inundepth.tif -depth depths.csv",
-            "Inundation depth calculation"
-        )
-
     def run_workflow(self):
         """Execute the complete HAND dam workflow."""
         logger.info("Starting HAND Dam Workflow...")
@@ -477,10 +461,8 @@ class HandDamWorkflow:
             self.process_additional_outlets()
             self.create_catchment_list()
 
-            # Phase 8: Inundation analysis
-            self.run_inundation_analysis()
-
             logger.info("HAND Dam Workflow completed successfully!")
+            logger.info("To run inundation analysis, use the dam_inundation.py script.")
 
         except Exception as e:
             logger.error(f"Workflow failed: {str(e)}")
