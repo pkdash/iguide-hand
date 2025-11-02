@@ -266,7 +266,12 @@ class HandDamWorkflow:
 
         # Flow direction conditioning
         self.run_taudem_command(
-            "mpiexec -n 4 flowdircond -z elev_cm.tif -p pfdc.tif -zfdc elevfdc.tif",
+            (
+                "mpiexec -n 4 flowdircond "
+                "-z elev_cm.tif "
+                "-p pfdc.tif "
+                "-zfdc elevfdc.tif"
+            ),
             "Flow direction conditioning"
         )
 
@@ -276,25 +281,44 @@ class HandDamWorkflow:
 
         # Pit removal
         self.run_taudem_command(
-            "mpiexec -n 8 pitremove -z elevNHDm.tif -fel fel.tif",
+            (
+                "mpiexec -n 8 pitremove "
+                "-z elevNHDm.tif "
+                "-fel fel.tif"
+            ),
             "Pit removal"
         )
 
         # D8 flow direction
         self.run_taudem_command(
-            "mpiexec -n 8 d8flowdir -fel fel.tif -p p.tif -sd8 sd8.tif",
+            (
+                "mpiexec -n 8 d8flowdir "
+                "-fel fel.tif "
+                "-p p.tif "
+                "-sd8 sd8.tif"
+            ),
             "D8 flow direction"
         )
 
         # D-infinity flow direction
         self.run_taudem_command(
-            "mpiexec -n 8 dinfflowdir -fel fel.tif -ang ang.tif -slp slp.tif",
+            (
+                "mpiexec -n 8 dinfflowdir "
+                "-fel fel.tif "
+                "-ang ang.tif "
+                "-slp slp.tif"
+            ),
             "D-infinity flow direction"
         )
 
         # Contributing area
         self.run_taudem_command(
-            "mpiexec -n 8 aread8 -p p.tif -ad8 ad8.tif -nc",
+            (
+                "mpiexec -n 8 aread8 "
+                "-p p.tif "
+                "-ad8 ad8.tif "
+                "-nc"
+            ),
             "Contributing area calculation"
         )
 
@@ -304,13 +328,24 @@ class HandDamWorkflow:
 
         # Threshold for stream network
         self.run_taudem_command(
-            "mpiexec -n 8 threshold -ssa ad8.tif -src srctemp.tif -thresh 10000",
+            (
+                "mpiexec -n 8 threshold "
+                "-ssa ad8.tif "
+                "-src srctemp.tif "
+                "-thresh 10000"
+            ),
             "Stream network threshold"
         )
 
         # Move outlets to streams
         self.run_taudem_command(
-            "mpiexec -n 4 MoveOutletsToStreams -p p.tif -src srctemp.tif -o proj_damloc.shp -om outlet.shp",
+            (
+                "mpiexec -n 4 MoveOutletsToStreams "
+                "-p p.tif "
+                "-src srctemp.tif "
+                "-o proj_damloc.shp "
+                "-om outlet.shp"
+            ),
             "Move outlets to streams"
         )
 
@@ -319,14 +354,28 @@ class HandDamWorkflow:
         logger.info("Running TauDEM Phase 4: HAND calculation...")
 
         # Contributing area with weight grid (for HAND calculation)
-        self.run_taudem_command(
-            "mpiexec -n 8 aread8 -p p.tif -ad8 src.tif -wg damloc.tif -nc",
+        self.run_taudem_command( 
+            (
+                "mpiexec -n 8 aread8 "
+                "-p p.tif "
+                "-ad8 src.tif "
+                "-wg damloc.tif "
+                "-nc"
+            ),
             "Contributing area with weight grid for HAND"
         )
 
         # HAND calculation
         self.run_taudem_command(
-            "mpiexec -n 8 dinfdistdown -ang ang.tif -fel fel.tif -src src.tif -dd hand.tif -m ave v -nc",
+            (
+                "mpiexec -n 8 dinfdistdown "
+                "-ang ang.tif "
+                "-fel fel.tif "
+                "-src src.tif "
+                "-dd hand.tif "
+                "-m ave v "
+                "-nc"
+            ),
             "HAND calculation"
         )
 
@@ -356,15 +405,35 @@ class HandDamWorkflow:
 
         # Move outlets to streams with maximum distance
         self.run_taudem_command(
-            "mpiexec -n 4 MoveOutletsToStreams -p p.tif -src src.tif -o outlets2_geo.shp -om outlets2_align.shp -md 3000",
+            (
+                "mpiexec -n 4 MoveOutletsToStreams "
+                "-p p.tif "
+                "-src src.tif "
+                "-o outlets2_geo.shp "
+                "-om outlets2_align.shp "
+                "-md 3000"
+            ),
             "Move additional outlets to streams"
         )
 
         # Stream network analysis
         self.run_taudem_command(
-            "mpiexec -n 4 StreamNet -fel fel.tif -p p.tif -ad8 ad8.tif -src src.tif -ord ord2.tif -tree tree2.txt -coord coord2.txt -net net2.shp -o outlets2_align.shp -w w2.tif",
+            (
+                "mpiexec -n 4 StreamNet "
+                "-fel fel.tif "
+                "-p p.tif "
+                "-ad8 ad8.tif "
+                "-src src.tif "
+                "-ord ord2.tif "
+                "-tree tree2.txt "
+                "-coord coord2.txt "
+                "-net net2.shp "
+                "-o outlets2_align.shp "
+                "-w w2.tif"
+            ),
             "Stream network analysis"
         )
+
 
     def create_catchment_list(self):
         """Create catchment list CSV from stream network shapefile."""

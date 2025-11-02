@@ -83,7 +83,15 @@ class DamInundationAnalysis:
         logger.info("Running hydraulic geometry calculation...")
 
         self.run_taudem_command(
-            "mpiexec -n 4 catchhydrogeo -hand hand.tif -catch w2.tif -catchlist catchlist.csv -slp slp.tif -h stage.txt -table hydroprop.csv",
+            (
+                "mpiexec -n 4 catchhydrogeo "
+                "-hand hand.tif "
+                "-catch w2.tif "
+                "-catchlist catchlist.csv "
+                "-slp slp.tif "
+                "-h stage.txt "
+                "-table hydroprop.csv"
+            ),
             "Hydraulic geometry calculation"
         )
 
@@ -92,7 +100,15 @@ class DamInundationAnalysis:
         logger.info("Running inundation depth calculation...")
 
         self.run_taudem_command(
-            "mpiexec -n 4 inundepth -hand hand.tif -catch w2.tif -fc forecast.csv -hp hydroprop.csv -inun inundepth.tif -depth depths.csv",
+            (
+                "mpiexec -n 4 inundepth "
+                "-hand hand.tif "
+                "-catch w2.tif "
+                "-fc forecast.csv "
+                "-hp hydroprop.csv "
+                "-inun inundepth.tif "
+                "-depth depths.csv"
+            ),
             "Inundation depth calculation"
         )
 
