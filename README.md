@@ -57,7 +57,7 @@ Before installing Python dependencies, ensure you have the following external to
 
    ```bash
    # On macOS/Linux:
-   python3 -m venv .venv --system-site-packages
+   python3 -m venv .venv
    ```
 
    ```bash
@@ -65,14 +65,14 @@ Before installing Python dependencies, ensure you have the following external to
    python -m venv .venv --system-site-packages
    ```
 
-   NOTE: The `--system-site-packages` flag is important to ensure that the virtual environment has access to the external tools (e.g., GDAL) installed on the system.
+   **NOTE**: The `--system-site-packages` flag is important in Windows to ensure that the virtual environment has access to the external tools (e.g., GDAL) installed on the system.
 
 2. **Activate the virtual environment**:
 
    ```bash
    # On macOS/Linux:
    source .venv/bin/activate
-   
+
    # On Windows:
    .venv\Scripts\activate
    ```
@@ -80,8 +80,14 @@ Before installing Python dependencies, ensure you have the following external to
 3. **Install Python dependencies**:
 
    ```bash
+   # On macOS/Linux:
    pip install -r requirements.txt
+
+   # On Windows:
+   pip install -r win-requirements.txt
    ```
+
+   **NOTE**: The Windows requirements file does not include Python bindings for GDAL installation. We assume Python bindings for GDAL is already installed on the system as part of the TauDEM installation (ArcGIS TauDEM tools).
 
 4. **Verify installation**:
 
@@ -95,9 +101,9 @@ The `dam_catchments.py` script calculates downstream watershed boundaries and op
 
 ### Basic Usage with Raster Clipping
 
-```bash
-python src/dam_catchments.py --clip-rasters --buffer 4000
-```
+   ```bash
+   python src/dam_catchments.py --clip-rasters --buffer 4000
+   ```
 
 This command will:
 
@@ -124,9 +130,9 @@ The `dam_hand.py` script executes the HAND calculation workflow using TauDEM too
 
 #### Basic Usage
 
-```bash
-python src/dam_hand.py --taudem-path /path/to/taudem
-```
+   ```bash
+   python src/dam_hand.py --taudem-path /path/to/taudem
+   ```
 
 This command will:
 
@@ -207,6 +213,7 @@ iguide-hand/
 │   ├── inundepth.tif     # Inundation depths
 │   └── ...
 ├── requirements.txt
+├── win-requirements.txt  # For Windows
 └── README.md
 ```
 
