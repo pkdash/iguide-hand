@@ -70,6 +70,8 @@ class HUC12BoundingBoxCalculator:
         # Raster clipping results
         self.clipped_rasters = []
         self.failed_rasters = []
+
+        # Key names for HUC12 data (set during load)
         self.huc12_key_name_huc12 = 'huc12'
         self.huc12_key_name_name = 'name'
         self.huc12_key_name_areasqkm = 'areasqkm'
