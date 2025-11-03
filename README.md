@@ -77,6 +77,8 @@ Before installing Python dependencies, ensure you have the following external to
    .venv\Scripts\activate
    ```
 
+   **CHECK**: On Windows after activating the virtual environment, run `pip list` to verify that the GDAL is in the list of installed packages. If not, you need to install it manually. You can try this [tool](https://pypi.org/project/gdal-installer/) to install GDAL.
+
 3. **Install Python dependencies**:
 
    ```bash
