@@ -6,6 +6,7 @@ __pycache__
 .pytest_cache
 .venv
 .codacy
+.idea/
 ignore/
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
