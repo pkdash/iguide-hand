@@ -1,0 +1,15 @@
+[project]
+name = "iguide-hand"
+version = "0.1.0"
+description = "Python scripts for Height Above Nearest Drainage (HAND) inundation mapping workflow for aging dams."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "geopandas==1.0.1",
+    "rasterio==1.4.3",
+]
+
+[dependency-groups]
+macos = [
+    "gdal==3.11.0",
+]
