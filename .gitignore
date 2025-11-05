@@ -8,5 +8,6 @@ __pycache__
 .codacy
 .idea/
 ignore/
+src/iguide_hand.egg-info/
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
