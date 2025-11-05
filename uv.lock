@@ -79,12 +79,6 @@ wheels = [
 ]
 
 [[package]]
-name = "gdal"
-version = "3.11.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3d/45/8aec2bd5493067525a73a85847aab45cfed8d58be120ffcb8b11e9672339/gdal-3.11.0.tar.gz", hash = "sha256:ac59ccfe291d3ce4f6a9a3eed17da3777bc3bae970ce27217d4fa85db98650f8", size = 877693, upload-time = "2025-05-09T16:08:01.52Z" }
-
-[[package]]
 name = "geopandas"
 version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -110,19 +104,11 @@ dependencies = [
     { name = "rasterio" },
 ]
 
-[package.dev-dependencies]
-macos = [
-    { name = "gdal" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "geopandas", specifier = "==1.0.1" },
     { name = "rasterio", specifier = "==1.4.3" },
 ]
-
-[package.metadata.requires-dev]
-macos = [{ name = "gdal", specifier = "==3.11.0" }]
 
 [[package]]
 name = "numpy"

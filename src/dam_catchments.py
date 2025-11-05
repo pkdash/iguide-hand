@@ -19,10 +19,9 @@ import subprocess
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-from pyproj import CRS
 import logging
 from pathlib import Path
-from osgeo import gdal
+import rasterio
 
 # Logger will be configured in main()
 logger = logging.getLogger(__name__)
@@ -80,19 +79,11 @@ class HUC12BoundingBoxCalculator:
     def load_target_projection(self):
         """Load target projection from reference raster."""
         try:
-            import rasterio
             with rasterio.open(self.ref_projection_raster_path) as src:
                 self.target_crs = src.crs
             logger.info(f"Target CRS loaded: {self.target_crs}")
-        except ImportError:
-            logger.error("rasterio not available, using GDAL to get projection")
-            # Fallback to GDAL
-            dataset = gdal.Open(self.ref_projection_raster_path)
-            if dataset:
-                self.target_crs = CRS.from_wkt(dataset.GetProjection())
-                logger.info(f"Target CRS loaded via GDAL: {self.target_crs}")
-            else:
-                raise ValueError(f"Could not open {self.ref_projection_raster_path}")
+        except Exception as e:
+            raise ValueError(f"Could not open {self.ref_projection_raster_path}: {str(e)}")
 
     def load_dam_location(self):
         """Load and reproject dam location to target CRS."""
@@ -319,34 +310,23 @@ class HUC12BoundingBoxCalculator:
         return sorted(raster_files)
 
     def get_raster_compression(self, raster_path):
-        """Get compression settings from input raster using GDAL."""
+        """Get compression settings from input raster using rasterio."""
         try:
-            dataset = gdal.Open(str(raster_path))
-            if dataset is None:
-                logger.warning(f"Could not open raster: {raster_path}")
-                return []
+            with rasterio.open(str(raster_path)) as src:
+                # Get creation options from the raster
+                creation_options = []
 
-            # Get creation options from the raster
-            creation_options = []
-
-            # Try to get compression info
-            band = dataset.GetRasterBand(1)
-            if band:
                 # Check for common compression types
-                metadata = dataset.GetMetadata()
-                if 'COMPRESSION' in metadata:
-                    compression = metadata['COMPRESSION']
-                    creation_options.append(f"COMPRESS={compression}")
-                    logger.debug(f"Found compression: {compression} for {raster_path.name}")
+                if hasattr(src, 'compression') and src.compression:
+                    creation_options.append(f"COMPRESS={src.compression.name}")
+                    logger.debug(f"Found compression: {src.compression.name} for {raster_path.name}")
 
                 # Check if it's tiled
-                block_x, block_y = band.GetBlockSize()
-                if block_x < dataset.RasterXSize or block_y < dataset.RasterYSize:
+                if src.block_shapes and src.block_shapes[0] != (src.height, src.width):
                     creation_options.append("TILED=YES")
                     logger.debug(f"Raster is tiled: {raster_path.name}")
 
-            dataset = None  # Close dataset
-            return creation_options
+                return creation_options
 
         except Exception as e:
             logger.warning(f"Could not get compression info for {raster_path}: {e}")
