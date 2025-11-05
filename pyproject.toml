@@ -8,3 +8,14 @@ dependencies = [
     "geopandas==1.0.1",
     "rasterio==1.4.3",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+dam_catchments = "dam_catchments:main"
+dam_hand = "dam_hand:main"
+dam_inundation = "dam_inundation:main"
+
+[tool.uv]
+package = true
