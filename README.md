@@ -1,8 +1,11 @@
 # iGuide HAND Dam Workflow
 
-This repository contains Python scripts for Height Above Nearest Drainage (HAND) inundation mapping workflow for aging dams. The workflow combines HUC12 watershed analysis with TauDEM hydrologic processing to generate flood inundation maps.
+This repository contains Python scripts for Height Above Nearest Drainage
+(HAND) inundation mapping workflow for aging dams. The workflow combines HUC12
+watershed analysis with TauDEM hydrologic processing to generate flood
+inundation maps.
 
-## Overview
+## Workflow Description
 
 ### dam_catchments.py
 
@@ -45,7 +48,7 @@ This modular approach allows for running inundation analysis multiple times with
 
 ### Prerequisites
 
-The HAND workflow requires TauDEM 5.4.0 or later. Make sure to install TauDEM and its dependencies before proceeding.
+The HAND workflow requires TauDEM 5.4.0 or later. Make sure to install TauDEM and its dependencies if not already installed.
 
 ### For End Users
 
@@ -54,52 +57,37 @@ If you just want to use the iGuide HAND workflow tools, you can install them usi
 #### Option 1: Using uv (Recommended)
 
 1. **Install uv** (if not already installed):
+
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 2. **Create a new project and install iguide-hand**:
+
    ```bash
    uv init my-dam-analysis
    cd my-dam-analysis
    uv add git+https://github.com/pkdash/iguide-hand.git
    ```
 
-3. **Run the scripts**:
-   ```bash
-   # Calculate bounding box and clip rasters
-   uv run dam_catchments --clip-rasters --buffer 4000
-   
-   # Run HAND calculation workflow
-   uv run dam_hand --taudem-path /usr/local/taudem
-   
-   # Run inundation analysis
-   uv run dam_inundation --taudem-path /usr/local/taudem
-   ```
-
 #### Option 2: Using pip
 
 1. **Create and activate a virtual environment**:
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
 2. **Install iguide-hand**:
+
    ```bash
    pip install git+https://github.com/pkdash/iguide-hand.git
    ```
 
-3. **Run the scripts**:
-   ```bash
-   python -m dam_catchments --clip-rasters --buffer 4000
-   python -m dam_hand --taudem-path /usr/local/taudem
-   python -m dam_inundation --taudem-path /usr/local/taudem
-   ```
+#### Option 3: Quick Testing (No Global Installation)
 
-#### Option 3: Quick Testing (No Installation)
-
-For quick testing without installation, you can clone the repository and use `uv run`:
+For quick testing without global installation, you can clone the repository and use `uv run`:
 
 ```bash
 git clone https://github.com/pkdash/iguide-hand.git
@@ -110,14 +98,181 @@ uv run dam_catchments --help
 
 ### Data Setup
 
-Before running the workflow, ensure you have the required data files in the `data/` directory:
+Before running the workflow, verify your `data/` directory contains the required
+source datasets. Note that the `data/` directory is not included in the repository and must be created manually relative to the project root directory. The scripts expect the following structure:
 
-- Dam location shapefile
-- HUC12 geodatabase from NHDPlus
-- NHDPlus raster files
-- `stage.txt` - Stage height data
-- `forecast.csv` - Forecast data
-- `Outlets2_utm.shp` - Outlet locations shapefile
+#### Required Datasets
+
+- **Dam Location**: A shapefile (`.shp`) containing the point location of the dam.
+- **NHDPlus HUC12 Geodatabase**: The `WBD_National_GDB.gdb` or specific HUC12
+  boundary layers.
+- **NHDPlus Rasters**: Elevation (DEM), Flow Direction (Fdr), and Flow
+  Accumulation (Fac) rasters.
+- **Stage Data**: `stage.txt` containing stage-discharge relationships.
+- **Forecast Data**: `forecast.csv` with target discharge values.
+- **Outlet Locations**: `Outlets2_utm.shp` defining the watershed outlets.
+
+#### Example Directory Structure
+
+```text
+data/
+├── dam/
+│   └── dam_location.shp
+├── nhdplus/
+│   ├── WBD_National_GDB.gdb
+│   └── HR_Rasters/
+│       ├── elev_cm.tif
+│       ├── fdr.tif
+│       └── fac.tif
+│       └── hydrodem.tif
+├── hydrologic_data/
+│   ├── stage.txt
+│   ├── forecast.csv
+│   └── Outlets2_utm.shp
+```
+
+## Detailed Execution Commands
+
+Follow this sequence for a complete analysis. These commands require the data
+directory to be set up as described above.
+
+### 1. Computing HUC12 Bounding Box and Clipping HUC12 Rasters
+
+Calculate downstream HUC12s and prepare clipped datasets to optimize performance.
+
+```bash
+uv run dam_catchments \
+  --dam-shapefile data/dam/dam_location.shp \
+  --huc12-gdb data/nhdplus/WBD_National_GDB.gdb \
+  --raster-dir data/nhdplus/HR_Rasters \
+  --ref-projection-raster data/nhdplus/HR_Rasters/hydrodem.tif \
+  --buffer 4000 \
+  --output-dir outputs \
+  --clipped-dir clipped \
+  --clip-rasters
+```
+
+For detailed commmand options, run `uv run dam_catchments --help`. Running `dam_catchments` with deault arguments:
+
+```bash
+uv run dam_catchments --clip-rasters --buffer 4000
+```
+
+Check the source code for the default values of the arguments.
+
+This command will:
+
+- Calculate the bounding box for all HUC12 watersheds downstream from the dam location
+- Clip all NHDPlus rasters to the calculated bounding box
+- Add a 4000-meter buffer around the bounding box before clipping
+- Save clipped rasters to `outputs/clipped/` directory
+- Generate processing reports and downstream HUC12 shapefiles
+
+**Arguments:**
+
+- `--dam-shapefile`: Path to the dam location shapefile.
+- `--huc12-gdb`: Path to the NHDPlus HUC12 geodatabase.
+- `--raster-dir`: Directory containing source rasters.
+- `--ref-projection-raster`: Reference raster for target projection.
+- `--buffer`: Extension distance (meters) around the bounding box.
+- `--output-dir`: Directory for output files.
+- `--clipped-dir`: Subdirectory for clipped rasters (within `outputs/`).
+- `--clip-rasters`: Flag to trigger the clipping process.
+
+**Outputs:**
+
+- `outputs/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
+- `outputs/bounding_box_coordinates.txt`: CRS and coordinate bounds.
+- `outputs/processing_report.txt`: Log of the catchment analysis.
+- `outputs/clipped/`: Directory containing trimmed NHDPlus rasters.
+
+### 2. HAND Calculation Workflow
+
+Generate the Height Above Nearest Drainage (HAND) raster using TauDEM tools.
+
+```bash
+uv run dam_hand \
+  --taudem-path /usr/local/bin \
+  --data-dir data \
+  --clipped-dir outputs/clipped \
+  --output-dir outputs/hand_results
+```
+
+For detailed commmand options, run `uv run dam_hand --help`. Running `dam_hand` with deault arguments:
+
+```bash
+uv run dam_hand --taudem-path /usr/local/bin
+```
+
+Check the source code for the default values of the arguments.
+
+This command will:
+
+- Copy clipped rasters and input files to the working directory
+- Process flow directions and elevation data
+- Run TauDEM hydrologic analysis tools
+- Calculate HAND (Height Above Nearest Drainage) values
+- Generate stream networks and process outlet locations
+- Create catchment lists for hydraulic analysis
+
+**Arguments:**
+
+- `--taudem-path`: Directory containing TauDEM executable binaries.
+- `--data-dir`: Directory containing input data files (default: data).
+- `--clipped-dir`: Folder containing clipped rasters from step 1.
+- `--output-dir`: Directory to save HAND results.
+- `--outlets-on-reaches`: Name of outlets shapefile in data directory
+  (default: Outlets2_utm.shp).
+
+**Outputs:**
+
+- `outputs/hand_results/hand.tif`: Height Above Nearest Drainage raster.
+- `outputs/hand_results/w2.tif`: Catchment raster.
+- `outputs/hand_results/catchlist.csv`: List of catchment properties.
+- `outputs/hand_results/slp.tif`: Slope raster.
+- Various intermediate files generated by TauDEM tools.
+
+### 3. Inundation Mapping
+
+Finalize the workflow by generating depth rasters based on specific scenarios.
+
+```bash
+uv run dam_inundation \
+  --taudem-path /usr/local/bin \
+  --hand-raster outputs/hand_results/hand.tif \
+  --forecast-file data/hydrologic_data/forecast.csv \
+  --stage-file data/hydrologic_data/stage.txt \
+  --output-dir outputs/final_flood_map
+```
+
+For detailed commmand options, run `uv run dam_inundation --help`. Running `dam_inundation` with deault arguments:
+
+```bash
+uv run dam_inundation --taudem-path /usr/local/bin
+```
+
+Check the source code for the default values of the arguments.
+
+This command will:
+
+- Validate that all required HAND workflow outputs exist
+- Calculate hydraulic geometry for stream reaches
+- Compute inundation depths using forecast data
+- Generate flood inundation maps and depth summaries
+
+**Arguments:**
+
+- `--taudem-path`: Directory containing TauDEM executable binaries.
+- `--hand-raster`: Path to the HAND raster generated in step 2.
+- `--forecast-file`: Path to CSV containing discharge scenarios.
+- `--stage-file`: Path to the stage-discharge lookup file.
+- `--output-dir`: Directory to save final inundation maps and reports.
+
+**Outputs:**
+
+- `outputs/final_flood_map/hydroprop.csv`: Hydraulic properties table.
+- `outputs/final_flood_map/inundepth.tif`: Flood inundation depth raster.
+- `outputs/final_flood_map/depths.csv`: Summary of depth calculations per reach.
 
 ## Development Setup
 
@@ -135,18 +290,21 @@ If you want to contribute to the iGuide HAND workflow or modify the code, follow
 #### Setup Development Environment
 
 1. **Clone the repository**:
+
    ```bash
    git clone https://github.com/pkdash/iguide-hand.git
    cd iguide-hand
    ```
 
 2. **Set up development environment with uv (Recommended)**:
+
    ```bash
    # Sync dependencies and set up virtual environment automatically
    uv sync
    ```
 
 3. **Alternative: Set up with pip**:
+
    ```bash
    # Create virtual environment
    python -m venv .venv
@@ -159,6 +317,7 @@ If you want to contribute to the iGuide HAND workflow or modify the code, follow
    ```
 
 4. **Verify installation**:
+
    ```bash
    python -c "import geopandas, rasterio, numpy, pandas; print('All dependencies installed successfully!')"
    ```
@@ -168,6 +327,7 @@ If you want to contribute to the iGuide HAND workflow or modify the code, follow
 1. **Make your changes** to the source code in the `src/` directory
 
 2. **Test your changes**:
+
    ```bash
    # Run the scripts directly during development using python
    python src/dam_catchments.py --help
@@ -183,6 +343,7 @@ If you want to contribute to the iGuide HAND workflow or modify the code, follow
 3. **Add tests** (if applicable) and ensure existing functionality works
 
 4. **Commit and push your changes**:
+
    ```bash
    git add .
    git commit -m "Description of your changes"
@@ -208,142 +369,15 @@ iguide-hand/
 │   ├── dam_inundation.py # Inundation analysis
 │   └── utils.py         # Utility functions
 ├── data/                # Input data files (not in repo)
-├── outputs/             # Generated output files
+├── outputs/             # Generated output files (not in repo)
 ├── tests/               # Unit tests (future)
 ├── pyproject.toml       # Project configuration and dependencies
 ├── README.md           # This file
 └── .gitignore          # Git ignore rules
 ```
 
-## Computing HUC12 Bounding Box and Clipping HUC12 Rasters
-
-The `dam_catchments.py` script calculates downstream watershed boundaries and optionally clips rasters to reduce processing area.
-
-### Basic Usage with Raster Clipping
-
-   ```bash
-   uv run dam_catchments --clip-rasters --buffer 4000
-   ```
-
-This command will:
-
-- Calculate the bounding box for all HUC12 watersheds downstream from the dam location
-- Clip all NHDPlus rasters to the calculated bounding box
-- Add a 4000-meter buffer around the bounding box before clipping
-- Save clipped rasters to `outputs/clipped/` directory
-- Generate processing reports and downstream HUC12 shapefiles
-
-### Output Files
-
-- `outputs/downstream_huc12s_from_dam.shp` - Downstream HUC12 watersheds shapefile
-- `outputs/bounding_box_coordinates.txt` - Bounding box coordinates in target projection
-- `outputs/processing_report.txt` - Detailed processing summary
-- `outputs/clipped/` - Directory containing clipped raster files
-
-## HAND Workflow
-
-The HAND workflow is now split into two scripts for better modularity:
-
-### 1. HAND Data Generation
-
-The `dam_hand.py` script executes the HAND calculation workflow using TauDEM tools.
-
-#### Basic Usage
-
-   ```bash
-   uv run dam_hand --taudem-path /path/to/taudem
-   ```
-
-This command will:
-
-- Copy clipped rasters and input files to the working directory
-- Process flow directions and elevation data
-- Run TauDEM hydrologic analysis tools
-- Calculate HAND (Height Above Nearest Drainage) values
-- Generate stream networks and process outlet locations
-- Create catchment lists for hydraulic analysis
-
-### 2. Inundation Analysis
-
-The `dam_inundation.py` script performs flood inundation analysis using the HAND data.
-
-#### Basic Usage
-
-```bash
-uv run dam_inundation --taudem-path /path/to/taudem
-```
-
-This command will:
-
-- Validate that all required HAND workflow outputs exist
-- Calculate hydraulic geometry for stream reaches
-- Compute inundation depths using forecast data
-- Generate flood inundation maps and depth summaries
-
-### Prerequisites for HAND Workflow
-
-Before running the HAND workflow, ensure you have:
-
-1. **Completed HUC12 bounding box calculation** with `--clip-rasters` option
-2. **TauDEM installed** and accessible at the specified path
-3. **Required input files** in the `data/` directory:
-   - `stage.txt` - Stage height data
-   - `forecast.csv` - Forecast data
-   - `Outlets2_utm.shp` - Outlet locations shapefile
-   - Dam location shapefile and HUC12 geodatabase
-
-### HAND Workflow Output Files
-
-The workflow generates numerous output files including:
-
-**From dam_hand.py:**
-
-- `hand.tif` - Height Above Nearest Drainage raster
-- `w2.tif` - Catchment raster
-- `catchlist.csv` - Catchment properties list
-- `slp.tif` - Slope raster
-- Various intermediate TauDEM processing files
-
-**From dam_inundation.py:**
-
-- `hydroprop.csv` - Hydraulic properties table
-- `inundepth.tif` - Inundation depth raster
-- `depths.csv` - Depth calculations summary
-
-## Workflow Sequence
-
-For a complete analysis, run the scripts in the following order:
-
-1. **First**, calculate bounding box and clip rasters:
-
-   ```bash
-   uv run dam_catchments --clip-rasters --buffer 4000
-   ```
-
-2. **Second**, run the HAND calculation workflow:
-
-   ```bash
-   uv run dam_hand --taudem-path /usr/local/taudem
-   ```
-
-3. **Third**, run the inundation analysis:
-
-   ```bash
-   uv run dam_inundation --taudem-path /usr/local/taudem
-   ```
-
-4. **Finally**, if not using `uv`, deactivate the virtual environment when finished:
-
-   ```bash
-   deactivate
-   ```
-
-This sequence ensures efficient processing by:
-
-- Operating on clipped data to reduce computational requirements
-- Separating HAND calculation from inundation analysis for modularity
-- Allowing multiple inundation scenarios without re-running HAND calculations
-
 ## Support
 
-For questions or issues related to this workflow, please refer to the processing reports generated by each script, which contain detailed logs and diagnostic information.
+For questions or issues related to this workflow, please refer to the processing
+reports generated by each script, which contain detailed logs and diagnostic
+information.
