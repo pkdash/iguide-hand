@@ -7,7 +7,6 @@ workflow for aging dams
 
 """
 
-import os
 import sys
 import shutil
 import argparse
@@ -45,17 +44,17 @@ class HandDamWorkflow:
             clipped_dir: Directory containing clipped rasters
             outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
         """
-        self.taudem_path = os.path.expanduser(taudem_path)
-        self.output_dir = Path(output_dir)
-        self.data_dir = Path(data_dir)
-        self.clipped_dir = Path(clipped_dir)
+        self.taudem_path = Path(taudem_path).expanduser().resolve()
+        self.output_dir = Path(output_dir).resolve()
+        self.data_dir = Path(data_dir).resolve()
+        self.clipped_dir = Path(clipped_dir).resolve()
         self.outlets_on_reaches = outlets_on_reaches
 
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
 
         # Set up TauDEM PATH
-        setup_taudem_path(self.taudem_path)
+        setup_taudem_path(str(self.taudem_path))
 
     def run_taudem_command(self, command, description="TauDEM command"):
         """
@@ -65,7 +64,7 @@ class HandDamWorkflow:
             command: Command string to execute
             description: Description for logging
         """
-        run_taudem_command(command, description, cwd=self.output_dir)
+        run_taudem_command(command, description, cwd=str(self.output_dir))
 
     def copy_clipped_rasters(self):
         """Copy all clipped rasters from clipped directory to output directory."""
@@ -202,7 +201,7 @@ class HandDamWorkflow:
         logger.info(f"Created projected dam location: {output_shp}")
 
     def copy_outlets_on_reaches(self):
-        """Copy user-supplied outlets2_utm.shp from data directory to outputs directory."""
+        """Copy user-supplied Outlets2_utm.shp from data directory to outputs directory."""
         logger.info(f"Copying user-supplied outlets file: {self.outlets_on_reaches}")
 
         # Source file in data directory
@@ -213,7 +212,7 @@ class HandDamWorkflow:
             raise FileNotFoundError(f"User-supplied outlets file not found: {source_shp}")
 
         # Destination file in outputs directory
-        output_shp = self.output_dir / "outlets2_utm.shp"
+        output_shp = self.output_dir / "Outlets2_utm.shp"
 
         # Copy the shapefile and all its associated sidecar files
         # by finding all files with the same stem.
@@ -340,7 +339,7 @@ class HandDamWorkflow:
         # Move outlets to streams
         self.run_taudem_command(
             (
-                "mpiexec -n 4 MoveOutletsToStreams "
+                "mpiexec -n 4 moveoutletstostreams "
                 "-p p.tif "
                 "-src srctemp.tif "
                 "-o proj_damloc.shp "
@@ -383,12 +382,12 @@ class HandDamWorkflow:
         """Process additional outlets for stream network analysis."""
         logger.info("Processing additional outlets...")
 
-        # Project outlets2_utm to raster coordinate system
-        outlets2_utm = self.output_dir / "outlets2_utm.shp"
+        # Project Outlets2_utm to raster coordinate system
+        outlets2_utm = self.output_dir / "Outlets2_utm.shp"
         fel_raster = self.output_dir / "fel.tif"
-        outlets2_geo = self.output_dir / "outlets2_geo.shp"
+        outlets2_geo = self.output_dir / "Outlets2_geo.shp"
 
-        # Read outlets2_utm
+        # Read Outlets2_utm
         outlets_gdf = gpd.read_file(outlets2_utm)
 
         # Get target CRS from fel.tif
@@ -401,16 +400,16 @@ class HandDamWorkflow:
         # Save projected shapefile
         outlets_projected.to_file(outlets2_geo)
 
-        logger.info(f"Created outlets2_geo.shp: {outlets2_geo}")
+        logger.info(f"Created Outlets2_geo.shp: {outlets2_geo}")
 
         # Move outlets to streams with maximum distance
         self.run_taudem_command(
             (
-                "mpiexec -n 4 MoveOutletsToStreams "
+                "mpiexec -n 4 moveoutletstostreams "
                 "-p p.tif "
                 "-src src.tif "
-                "-o outlets2_geo.shp "
-                "-om outlets2_align.shp "
+                "-o Outlets2_geo.shp "
+                "-om Outlets2_align.shp "
                 "-md 3000"
             ),
             "Move additional outlets to streams"
@@ -419,7 +418,7 @@ class HandDamWorkflow:
         # Stream network analysis
         self.run_taudem_command(
             (
-                "mpiexec -n 4 StreamNet "
+                "mpiexec -n 4 streamnet "
                 "-fel fel.tif "
                 "-p p.tif "
                 "-ad8 ad8.tif "
@@ -428,7 +427,7 @@ class HandDamWorkflow:
                 "-tree tree2.txt "
                 "-coord coord2.txt "
                 "-net net2.shp "
-                "-o outlets2_align.shp "
+                "-o Outlets2_align.shp "
                 "-w w2.tif"
             ),
             "Stream network analysis"

@@ -12,7 +12,6 @@ This script:
 7. Optionally clips all NHDPlus rasters in a directory to the bounding box
 """
 
-import os
 import sys
 import argparse
 import subprocess
@@ -47,14 +46,15 @@ class HUC12BoundingBoxCalculator:
             clipped_dir: Subdirectory name for clipped NHDPlus rasters
             buffer_distance: Buffer distance in meters around bounding box
         """
-        self.dam_shapefile = dam_shapefile
-        self.huc12_gdb_path = huc12_gdb_path
-        self.ref_projection_raster_path = ref_projection_raster_path
-        self.output_dir = Path(output_dir)
+        # Convert all paths to absolute Path objects
+        self.dam_shapefile = Path(dam_shapefile).resolve()
+        self.huc12_gdb_path = Path(huc12_gdb_path).resolve()
+        self.ref_projection_raster_path = Path(ref_projection_raster_path).resolve()
+        self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(exist_ok=True)
 
         # Raster clipping parameters
-        self.raster_dir = Path(raster_dir) if raster_dir else None
+        self.raster_dir = Path(raster_dir).resolve() if raster_dir else None
         self.clipped_dir = self.output_dir / clipped_dir
         self.buffer_distance = buffer_distance
 
@@ -79,7 +79,7 @@ class HUC12BoundingBoxCalculator:
     def load_target_projection(self):
         """Load target projection from reference raster."""
         try:
-            with rasterio.open(self.ref_projection_raster_path) as src:
+            with rasterio.open(str(self.ref_projection_raster_path)) as src:
                 self.target_crs = src.crs
             logger.info(f"Target CRS loaded: {self.target_crs}")
         except Exception as e:
@@ -88,7 +88,7 @@ class HUC12BoundingBoxCalculator:
     def load_dam_location(self):
         """Load and reproject dam location to target CRS."""
         logger.info("Loading dam location...")
-        self.dam_location = gpd.read_file(self.dam_shapefile)
+        self.dam_location = gpd.read_file(str(self.dam_shapefile))
 
         # Reproject to target CRS
         if self.dam_location.crs != self.target_crs:
@@ -105,7 +105,7 @@ class HUC12BoundingBoxCalculator:
     def load_huc12_data(self):
         """Load HUC12 data from geodatabase."""
         logger.info("Loading HUC12 data...")
-        self.huc12_data = gpd.read_file(self.huc12_gdb_path, layer='WBDHU12')
+        self.huc12_data = gpd.read_file(str(self.huc12_gdb_path), layer='WBDHU12')
 
         # Reproject to target CRS
         if self.huc12_data.crs != self.target_crs:
@@ -428,7 +428,7 @@ class HUC12BoundingBoxCalculator:
                 })
 
             except Exception as e:
-                error_msg = f"Unexpected error clipping {raster_path.name}: {str(e)}"
+                error_msg = f"Error clipping {raster_path.name}: {str(e)}"
                 logger.error(error_msg)
                 self.failed_rasters.append({
                     'input': raster_path.name,
@@ -710,17 +710,29 @@ def main():
     # Setup logging
     setup_logging(args.verbose, args.quiet)
 
-    # Check if files exist
-    for filepath in [args.dam_shapefile, args.huc12_gdb, args.ref_projection_raster]:
-        if not os.path.exists(filepath):
+    # Convert paths to absolute and check if files exist
+    dam_shapefile = Path(args.dam_shapefile).resolve()
+    huc12_gdb = Path(args.huc12_gdb).resolve()
+    ref_projection_raster = Path(args.ref_projection_raster).resolve()
+    
+    logger.info(f"Working directory: {Path.cwd()}")
+    logger.info(f"Dam shapefile: {dam_shapefile}")
+    logger.info(f"HUC12 GDB: {huc12_gdb}")
+    logger.info(f"Reference raster: {ref_projection_raster}")
+
+    # Validate required files exist
+    for filepath in [dam_shapefile, huc12_gdb, ref_projection_raster]:
+        if not filepath.exists():
             logger.error(f"Required file not found: {filepath}")
+            logger.error(f"  Absolute path: {filepath.absolute()}")
+            logger.error(f"  Current working directory: {Path.cwd()}")
             sys.exit(1)
 
     # Create calculator and run analysis
     calculator = HUC12BoundingBoxCalculator(
-        dam_shapefile=args.dam_shapefile,
-        huc12_gdb_path=args.huc12_gdb,
-        ref_projection_raster_path=args.ref_projection_raster,
+        dam_shapefile=dam_shapefile,
+        huc12_gdb_path=huc12_gdb,
+        ref_projection_raster_path=ref_projection_raster,
         output_dir=args.output_dir,
         raster_dir=args.raster_dir if args.clip_rasters else None,
         clipped_dir=args.clipped_dir,
