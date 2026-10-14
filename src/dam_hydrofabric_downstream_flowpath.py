@@ -11,7 +11,7 @@ This script:
 5. Exports the accumulated flowpath as a GeoPackage.
 
 Usage:
-    python generate_hydrofabric_dam_flowpath.py [gpkg_path] [dam_shp_path] [output_file]
+    python dam_hydrofabric_downstream_flowpath.py [gpkg_path] [dam_shp_path] [output_file]
 
 Defaults:
     gpkg_path   : data/conus_nextgen_hydrofabric/conus_nextgen.gpkg
