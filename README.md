@@ -20,6 +20,17 @@ This script calculates bounding boxes for all HUC12 watersheds downstream from a
 
 The script outputs downstream HUC12 shapefiles, bounding box coordinates, and optionally clipped rasters for efficient processing.
 
+### dam_hydrofabric_downstream_flowpath.py
+
+This script extracts the downstream flowpath from the NextGen hydrofabric, starting at the dam. It must be run **before** `dam_hand.py`, because `dam_hand.py` uses its output to populate hydraulic parameters (Manning's `n`, Muskingum `MusK`/`MusX`) in `catchlist.csv`. Key features include:
+
+- **Dam Snapping**: Finds the hydrofabric flowpath that intersects the dam point, or the nearest one if none intersects
+- **Downstream Traversal**: Resolves the NextGen 2-hop topology (`wb-A -> nex-B -> wb-C`) to walk downstream
+- **Automatic Termination**: Stops at 100 km (configurable), at the end of the network, or at the edge of the dataset
+- **Self-contained Output**: Writes a GeoPackage with the `flowpath` geometries and the matching `flowpath-attributes` rows
+
+If this output is missing, `dam_hand.py` falls back to default values (`n=0.05`, `MusK=MusX=0`).
+
 ### dam_hand.py
 
 This script implements the HAND (Height Above Nearest Drainage) calculation workflow. Key components include:
@@ -111,11 +122,18 @@ source datasets. Note that the `data/` directory is not included in the reposito
 - **Stage Data**: `stage.txt` containing stage-discharge relationships.
 - **Forecast Data**: `forecast.csv` with target discharge values.
 - **Outlet Locations**: `Outlets2_utm.shp` defining the watershed outlets.
+- **NextGen Hydrofabric** (for `dam_hydrofabric_downstream_flowpath.py`): A CONUS
+  NextGen hydrofabric GeoPackage with `flowpaths`, `nexus` and (optionally)
+  `flowpath-attributes` layers.
 
 #### Example Directory Structure
 
 ```text
 data/
+├── conus_nextgen_hydrofabric/
+│   └── conus_nextgen.gpkg
+├── mountain_dell_ngen_hydrofabric/   # created by dam_hydrofabric_downstream_flowpath.py
+│   └── downstream_flowpath_conus.gpkg
 ├── dam/
 │   └── dam_location.shp
 ├── nhdplus/
@@ -186,7 +204,48 @@ This command will:
 - `outputs/processing_report.txt`: Log of the catchment analysis.
 - `outputs/clipped/`: Directory containing trimmed NHDPlus rasters.
 
-### 2. HAND Calculation Workflow
+### 2. Generating the Hydrofabric Downstream Flowpath
+
+Extract the NextGen hydrofabric flowpaths downstream of the dam. This step must
+be completed **before** running `dam_hand`, which reads its output to assign
+`n`, `MusK` and `MusX` to each reach.
+
+This script is not an installed console entry point; run it directly:
+
+```bash
+uv run src/dam_hydrofabric_downstream_flowpath.py \
+  data/conus_nextgen_hydrofabric/conus_nextgen.gpkg \
+  data/dam/dam_location.shp \
+  data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg \
+  --max-distance 100
+```
+
+For detailed command options, run `uv run src/dam_hydrofabric_downstream_flowpath.py --help`.
+
+**Arguments** (the three positional arguments are optional):
+
+- `hydrofabric_gpkg_file_path`: NextGen hydrofabric GeoPackage (default:
+  `data/conus_nextgen_hydrofabric/conus_nextgen.gpkg`).
+- `dam_shape_file_path`: Dam location point shapefile (default:
+  `data/mountain_dell_dam_location.shp`). It is reprojected to the hydrofabric CRS if needed.
+- `output_file_name`: Output GeoPackage (default:
+  `outputs/mdd_downstream_flowpath.gpkg`).
+- `--max-distance`: Maximum downstream distance in km (default: 100).
+
+> **Note:** The script's default output path differs from the path `dam_hand`
+> reads by default
+> (`data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg`). Either
+> write the output to that location, as in the example above, or pass the
+> generated file to `dam_hand` with `--hydrofabric-flowpath-gpkg`.
+
+**Outputs:**
+
+- A GeoPackage containing:
+  - `flowpath`: Downstream reach geometries, in traversal order.
+  - `flowpath-attributes`: `n`, `MusK`, `MusX` and related attributes for those reaches
+    (written only if the input GeoPackage has this layer).
+
+### 3. HAND Calculation Workflow
 
 Generate the Height Above Nearest Drainage (HAND) raster using TauDEM tools.
 
@@ -195,7 +254,8 @@ uv run dam_hand \
   --taudem-path /usr/local/bin \
   --data-dir data \
   --clipped-dir outputs/clipped \
-  --output-dir outputs/hand_results
+  --output-dir outputs/hand_results \
+  --hydrofabric-flowpath-gpkg data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg
 ```
 
 For detailed commmand options, run `uv run dam_hand --help`. Running `dam_hand` with deault arguments:
@@ -223,6 +283,10 @@ This command will:
 - `--output-dir`: Directory to save HAND results.
 - `--outlets-on-reaches`: Name of outlets shapefile in data directory
   (default: Outlets2_utm.shp).
+- `--hydrofabric-flowpath-gpkg`: GeoPackage produced in step 2. Its `n`, `MusK`
+  and `MusX` values are joined onto the TauDEM reaches in `catchlist.csv`
+  (default: `data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg`).
+  If the file is missing, defaults are used (`n=0.05`, `MusK=MusX=0`).
 
 **Outputs:**
 
@@ -232,7 +296,7 @@ This command will:
 - `outputs/hand_results/slp.tif`: Slope raster.
 - Various intermediate files generated by TauDEM tools.
 
-### 3. Inundation Mapping
+### 4. Inundation Mapping
 
 Finalize the workflow by generating depth rasters based on specific scenarios.
 
@@ -263,7 +327,7 @@ This command will:
 **Arguments:**
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
-- `--hand-raster`: Path to the HAND raster generated in step 2.
+- `--hand-raster`: Path to the HAND raster generated in step 3.
 - `--forecast-file`: Path to CSV containing discharge scenarios.
 - `--stage-file`: Path to the stage-discharge lookup file.
 - `--output-dir`: Directory to save final inundation maps and reports.
@@ -365,6 +429,7 @@ This project follows standard Python conventions. When contributing:
 iguide-hand/
 ├── src/                  # Source code
 │   ├── dam_catchments.py # HUC12 analysis and raster clipping
+│   ├── dam_hydrofabric_downstream_flowpath.py # NextGen downstream flowpath (run before dam_hand)
 │   ├── dam_hand.py      # HAND calculation workflow
 │   ├── dam_inundation.py # Inundation analysis
 │   └── utils.py         # Utility functions
