@@ -7,6 +7,7 @@ workflow for aging dams
 
 """
 
+import os
 import sys
 import shutil
 import argparse
@@ -44,7 +45,7 @@ class HandDamWorkflow:
             clipped_dir: Directory containing clipped rasters
             outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
         """
-        self.taudem_path = Path(taudem_path).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
         self.data_dir = Path(data_dir).resolve()
         self.clipped_dir = Path(clipped_dir).resolve()
