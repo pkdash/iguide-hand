@@ -7,6 +7,7 @@ data and hydraulic geometry calculations.
 
 """
 
+import os
 import sys
 import argparse
 import logging
@@ -34,7 +35,7 @@ class DamInundationAnalysis:
             taudem_path: Path to TauDEM installation
             output_dir: Directory containing HAND workflow outputs
         """
-        self.taudem_path = Path(taudem_path).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
 
         # Set up TauDEM PATH

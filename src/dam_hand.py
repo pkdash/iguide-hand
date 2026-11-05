@@ -7,11 +7,13 @@ workflow for aging dams
 
 """
 
+import os
 import sys
 import shutil
 import argparse
 import logging
 import numpy as np
+import fiona
 import geopandas as gpd
 import pandas as pd
 from pathlib import Path
@@ -33,7 +35,8 @@ class HandDamWorkflow:
 
     def __init__(self, taudem_path="$HOME/taudem", output_dir="outputs",
                  data_dir="data", clipped_dir="outputs/clipped",
-                 outlets_on_reaches="Outlets2_utm.shp"):
+                 outlets_on_reaches="Outlets2_utm.shp",
+                 hydrofabric_gpkg_path=None):
         """
         Initialize the workflow.
 
@@ -43,12 +46,26 @@ class HandDamWorkflow:
             data_dir: Input data directory
             clipped_dir: Directory containing clipped rasters
             outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
+            hydrofabric_gpkg_path: Path to a downstream flowpath GeoPackage containing
+                'flowpath' (geometry) and 'flowpath-attributes' (n, MusK, MusX) layers.
+                If None, defaults to
+                data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg.
         """
-        self.taudem_path = Path(taudem_path).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
         self.data_dir = Path(data_dir).resolve()
         self.clipped_dir = Path(clipped_dir).resolve()
         self.outlets_on_reaches = outlets_on_reaches
+
+        # Hydrofabric flowpath GPKG — default relative to data_dir
+        if hydrofabric_gpkg_path is None:
+            self.hydrofabric_gpkg_path = (
+                self.data_dir
+                / "mountain_dell_ngen_hydrofabric"
+                / "downstream_flowpath_conus.gpkg"
+            )
+        else:
+            self.hydrofabric_gpkg_path = Path(hydrofabric_gpkg_path).resolve()
 
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
@@ -434,27 +451,192 @@ class HandDamWorkflow:
         )
 
 
+    def load_hydrofabric_attributes(self) -> gpd.GeoDataFrame | None:
+        """
+        Load and merge the flowpath geometry and hydraulic attributes from the
+        downstream flowpath GeoPackage.
+
+        Expects the GPKG to contain:
+          - 'flowpath'            : LineString geometries with an 'id' column.
+          - 'flowpath-attributes' : Non-spatial table with columns 'id', 'n', 'MusK', 'MusX'.
+
+        The two layers are merged on 'id' and the result is reprojected to the CRS
+        of the TauDEM outputs (read from outputs/fel.tif) so that sjoin_nearest in
+        create_catchment_list() operates in a consistent coordinate system.
+
+        Returns:
+            GeoDataFrame with geometry and hydraulic attribute columns, or None if the
+            GPKG is missing, the required layers are absent, or fel.tif is not yet available.
+        """
+        if not self.hydrofabric_gpkg_path.exists():
+            logger.warning(
+                "Hydrofabric GPKG not found: %s. "
+                "Manning_n will default to 0.05; MusK and MusX will default to 0.0.",
+                self.hydrofabric_gpkg_path,
+            )
+            return None
+
+        available_layers = fiona.listlayers(str(self.hydrofabric_gpkg_path))
+        logger.info(
+            "Hydrofabric GPKG layers available: %s", available_layers
+        )
+
+        # Determine geometry layer name ('flowpath' written by generate script,
+        # 'flowpaths' used in source NextGen GPKGs)
+        geom_layer = None
+        for candidate in ("flowpath", "flowpaths"):
+            if candidate in available_layers:
+                geom_layer = candidate
+                break
+
+        if geom_layer is None:
+            logger.warning(
+                "No 'flowpath' or 'flowpaths' layer found in %s. "
+                "Hydraulic attributes will use default values.",
+                self.hydrofabric_gpkg_path,
+            )
+            return None
+
+        flowpath_gdf = gpd.read_file(str(self.hydrofabric_gpkg_path), layer=geom_layer)
+        logger.info("Loaded '%s' layer: %d reaches.", geom_layer, len(flowpath_gdf))
+
+        # Merge hydraulic attributes if the layer is present
+        if "flowpath-attributes" in available_layers:
+            fa_df = gpd.read_file(
+                str(self.hydrofabric_gpkg_path), layer="flowpath-attributes"
+            )
+            # Validate required hydraulic columns
+            missing_cols = [c for c in ("id", "n", "MusK", "MusX") if c not in fa_df.columns]
+            if missing_cols:
+                logger.warning(
+                    "'flowpath-attributes' layer is missing columns %s. "
+                    "Hydraulic attributes will use default values.",
+                    missing_cols,
+                )
+            else:
+                flowpath_gdf = flowpath_gdf.merge(
+                    fa_df[["id", "n", "MusK", "MusX"]], on="id", how="left"
+                )
+                logger.info(
+                    "Merged hydraulic attributes: %d rows matched out of %d reaches.",
+                    flowpath_gdf[["n", "MusK", "MusX"]].notna().all(axis=1).sum(),
+                    len(flowpath_gdf),
+                )
+        else:
+            logger.warning(
+                "'flowpath-attributes' layer not found in %s. "
+                "Manning_n will default to 0.05; MusK and MusX will default to 0.0.",
+                self.hydrofabric_gpkg_path,
+            )
+
+        # Reproject to TauDEM output CRS (fel.tif) for spatial join consistency
+        fel_raster = self.output_dir / "fel.tif"
+        if fel_raster.exists():
+            with rasterio.open(str(fel_raster)) as src:
+                target_crs = src.crs
+            if flowpath_gdf.crs != target_crs:
+                logger.info(
+                    "Reprojecting hydrofabric from %s to %s.",
+                    flowpath_gdf.crs,
+                    target_crs,
+                )
+                flowpath_gdf = flowpath_gdf.to_crs(target_crs)
+        else:
+            logger.warning(
+                "fel.tif not found; skipping CRS reprojection of hydrofabric layer. "
+                "Ensure the spatial join in create_catchment_list() uses matching CRS."
+            )
+
+        return flowpath_gdf
+
     def create_catchment_list(self):
-        """Create catchment list CSV from stream network shapefile."""
+        """
+        Create catchment list CSV from the stream network shapefile, enriched with
+        per-reach hydraulic attributes from the downstream flowpath GeoPackage.
+
+        Hydraulic attributes (Manning_n, MusK, MusX) are sourced by spatially joining
+        each TauDEM reach in net2.shp to the nearest hydrofabric flowpath reach.
+        If no hydrofabric GPKG is available or a reach has no nearby match, default
+        values are applied: Manning_n=0.05, MusK=0.0, MusX=0.0.
+        """
+        # Default hydraulic values used when no hydrofabric match is found
+        DEFAULT_MANNING_N = 0.05
+        DEFAULT_MUSK = 0.0
+        DEFAULT_MUSX = 0.0
+
         logger.info("Creating catchment list...")
 
         net_shp = self.output_dir / "net2.shp"
         output_csv = self.output_dir / "catchlist.csv"
 
-        # Read stream network shapefile
+        # Read stream network shapefile and filter to outlet reaches (DSNODEID == 0)
         net_gdf = gpd.read_file(net_shp)
+        filtered_gdf = net_gdf[net_gdf['DSNODEID'] == 0].copy()
 
-        # Filter rows where DSNODEID == 0 (internal nodes)
-        filtered_gdf = net_gdf[net_gdf['DSNODEID'] == 0]
+        # Attempt to load hydrofabric hydraulic attributes for spatial join
+        hydrofabric_gdf = self.load_hydrofabric_attributes()
 
-        # Create catchment list dataframe
+        if hydrofabric_gdf is not None and not hydrofabric_gdf.empty:
+            # Ensure CRS alignment before spatial join
+            if filtered_gdf.crs != hydrofabric_gdf.crs:
+                logger.info(
+                    "Reprojecting net2.shp from %s to %s for spatial join.",
+                    filtered_gdf.crs,
+                    hydrofabric_gdf.crs,
+                )
+                filtered_gdf = filtered_gdf.to_crs(hydrofabric_gdf.crs)
+
+            # Determine which hydraulic columns are available after merge
+            hydro_cols = [c for c in ("n", "MusK", "MusX") if c in hydrofabric_gdf.columns]
+            join_cols = ["geometry"] + hydro_cols
+
+            joined_gdf = gpd.sjoin_nearest(
+                filtered_gdf,
+                hydrofabric_gdf[join_cols],
+                how="left",
+            )
+
+            matched = joined_gdf[hydro_cols].notna().all(axis=1).sum() if hydro_cols else 0
+            logger.info(
+                "Spatial join complete: %d/%d reaches matched to a hydrofabric flowpath.",
+                matched,
+                len(joined_gdf),
+            )
+            if matched < len(joined_gdf):
+                logger.warning(
+                    "%d reaches had no hydrofabric match; default values will be applied "
+                    "(Manning_n=%.2f, MusK=%.1f, MusX=%.1f).",
+                    len(joined_gdf) - matched,
+                    DEFAULT_MANNING_N,
+                    DEFAULT_MUSK,
+                    DEFAULT_MUSX,
+                )
+        else:
+            # No hydrofabric data — carry on with the unjoined filtered GDF
+            joined_gdf = filtered_gdf
+
+        # Build catchment list rows
         catchlist_data = []
-        for _, row in filtered_gdf.iterrows():
+        for _, row in joined_gdf.iterrows():
+            manning_n = (
+                row["n"] if "n" in row.index and pd.notna(row["n"])
+                else DEFAULT_MANNING_N
+            )
+            musk = (
+                row["MusK"] if "MusK" in row.index and pd.notna(row["MusK"])
+                else DEFAULT_MUSK
+            )
+            musx = (
+                row["MusX"] if "MusX" in row.index and pd.notna(row["MusX"])
+                else DEFAULT_MUSX
+            )
             catchlist_data.append({
                 'Id': row['LINKNO'],
                 'Slope': row['Slope'],
                 'Length': row['Length'],
-                'Manning_n': 0.05
+                'Manning_n': manning_n,
+                'MusK': musk,
+                'MusX': musx,
             })
 
         # Save to CSV
@@ -541,6 +723,16 @@ def main():
     )
 
     parser.add_argument(
+        "--hydrofabric-flowpath-gpkg",
+        default=None,
+        help=(
+            "Path to a downstream flowpath GeoPackage containing 'flowpath' geometry "
+            "and 'flowpath-attributes' (n, MusK, MusX) layers used to enrich catchlist.csv. "
+            "Default: data/mountain_dell_ngen_hydrofabric/downstream_flowpath_conus.gpkg"
+        )
+    )
+
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging"
@@ -558,7 +750,8 @@ def main():
         output_dir=args.output_dir,
         data_dir=args.data_dir,
         clipped_dir=args.clipped_dir,
-        outlets_on_reaches=args.outlets_on_reaches
+        outlets_on_reaches=args.outlets_on_reaches,
+        hydrofabric_gpkg_path=args.hydrofabric_flowpath_gpkg,
     )
 
     workflow.run_workflow()
