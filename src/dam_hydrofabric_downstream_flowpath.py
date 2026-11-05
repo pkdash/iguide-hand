@@ -8,7 +8,10 @@ This script:
 3. Builds a downstream adjacency graph by resolving the NextGen 2-hop topology:
    flowpath (wb-A) → nexus (nex-B) → flowpath (wb-C).
 4. Traverses downstream reaches up to 100 km (configurable) or until the network ends.
-5. Exports the accumulated flowpath as a GeoPackage.
+5. Clips the starting reach so it begins at the dam (direction inferred from the
+   downstream nexus), and rescales that reach's 'lengthkm', 'Length_m' and 'MusK'
+   by the retained length fraction.
+6. Exports the accumulated flowpath as a GeoPackage.
 
 Usage:
     python dam_hydrofabric_downstream_flowpath.py [gpkg_path] [dam_shp_path] [output_file]
@@ -26,6 +29,7 @@ from typing import Optional
 
 import fiona
 import geopandas as gpd
+from shapely.ops import linemerge, substring
 from shapely.strtree import STRtree
 
 logger = logging.getLogger(__name__)
@@ -370,6 +374,87 @@ class HydrofabricDamFlowpath:
     # Phase 5: Export
     # ------------------------------------------------------------------
 
+    def _reach_runs_downstream(self, reach_geom, flowpath_toid: Optional[str]) -> bool:
+        """
+        Decide whether a reach's vertex order follows flow direction.
+
+        The reach's two endpoints are compared to the downstream nexus point
+        (the reach's ``toid`` -> ``nex-B``). If the reach's *last* vertex is the
+        endpoint nearer that nexus, the line is digitised upstream -> downstream.
+
+        Parameters:
+            reach_geom: The reach geometry (LineString or MultiLineString).
+            flowpath_toid (Optional[str]): The reach's downstream nexus id (nex-B).
+
+        Returns:
+            bool: True if the reach is digitised in flow direction (downstream end
+                is the last vertex). Defaults to True when the nexus geometry is
+                unavailable, so the common case needs no clipping-direction flip.
+        """
+        if not flowpath_toid or self.nexus_gdf is None:
+            return True
+
+        match = self.nexus_gdf[self.nexus_gdf["id"] == flowpath_toid]
+        if match.empty or match.geometry.iloc[0] is None or match.geometry.iloc[0].is_empty:
+            return True
+
+        nex_pt = match.geometry.iloc[0]
+        start_pt = reach_geom.interpolate(0.0)
+        end_pt = reach_geom.interpolate(reach_geom.length)
+        return end_pt.distance(nex_pt) <= start_pt.distance(nex_pt)
+
+    def _clip_starting_reach_geometry(self, reach_geom, flowpath_toid: Optional[str]):
+        """
+        Clip the starting reach so it begins at the dam rather than at the
+        reach's upstream end.
+
+        The dam point is projected onto the reach via linear referencing, and the
+        downstream portion (dam -> reach's downstream end) is returned. The
+        downstream half is selected using the reach's digitised direction, which
+        is inferred from the downstream nexus location (see
+        :meth:`_reach_runs_downstream`).
+
+        Parameters:
+            reach_geom: The full starting-reach geometry.
+            flowpath_toid (Optional[str]): The reach's downstream nexus id (nex-B).
+
+        Returns:
+            The clipped (downstream) portion of the reach as a LineString, or the
+            original geometry unchanged if it is empty, cannot be merged into a
+            single LineString, or clipping yields an empty result.
+        """
+        if reach_geom is None or reach_geom.is_empty:
+            return reach_geom
+
+        geom = reach_geom
+        if geom.geom_type == "MultiLineString":
+            merged = linemerge(geom)
+            if merged.geom_type != "LineString":
+                logger.warning(
+                    "Starting reach is a MultiLineString that could not be merged "
+                    "into a single line; retaining full reach geometry (dam clip skipped)."
+                )
+                return reach_geom
+            geom = merged
+
+        # Distance along the line (from its first vertex) to the dam's nearest point.
+        proj = geom.project(self.dam_point)
+
+        if self._reach_runs_downstream(geom, flowpath_toid):
+            clipped = substring(geom, proj, geom.length)
+        else:
+            # Line digitised downstream -> upstream: the downstream half is [0, proj].
+            clipped = substring(geom, 0.0, proj)
+
+        if clipped.is_empty:
+            logger.warning(
+                "Clipping the starting reach at the dam yielded an empty geometry; "
+                "retaining full reach geometry."
+            )
+            return reach_geom
+
+        return clipped
+
     def export_flowpath(self, collected_ids: list[str]) -> None:
         """
         Filter the flowpaths GeoDataFrame to the collected reaches and write a GeoPackage.
@@ -399,6 +484,32 @@ class HydrofabricDamFlowpath:
         result_gdf = result_gdf.sort_values("_order").drop(columns=["_order"])
         result_gdf = result_gdf.reset_index(drop=True)
 
+        # Clip the first (starting) reach so the exported flowpath begins at the
+        # dam location instead of at the upstream end of the reach the dam falls on.
+        # The retained fraction is reused below to rescale the starting reach's
+        # length attribute in the 'flowpath-attributes' layer.
+        starting_id = collected_ids[0]
+        clip_frac: float = 1.0
+        start_mask = result_gdf["id"] == starting_id
+        if start_mask.any():
+            idx = result_gdf.index[start_mask][0]
+            full_geom = result_gdf.at[idx, "geometry"]
+            toid = result_gdf.at[idx, "toid"] if "toid" in result_gdf.columns else None
+            clipped_geom = self._clip_starting_reach_geometry(full_geom, toid)
+            result_gdf.at[idx, "geometry"] = clipped_geom
+
+            if full_geom is not None and full_geom.length > 0:
+                clip_frac = clipped_geom.length / full_geom.length
+
+            # Scale lengthkm by the retained fraction (CRS-unit independent).
+            if "lengthkm" in result_gdf.columns:
+                result_gdf.at[idx, "lengthkm"] = result_gdf.at[idx, "lengthkm"] * clip_frac
+            logger.info(
+                "Starting reach '%s' clipped at dam point (retained %.1f%% of its length).",
+                starting_id,
+                clip_frac * 100.0,
+            )
+
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         result_gdf.to_file(str(self.output_path), driver="GPKG", layer="flowpath")
         logger.info(
@@ -423,6 +534,31 @@ class HydrofabricDamFlowpath:
                 fa_subset = fa_subset.drop(columns=["geometry"])
             if not isinstance(fa_subset, gpd.GeoDataFrame):
                 fa_subset = gpd.GeoDataFrame(fa_subset)
+
+            # Rescale the starting reach's length-dependent attributes to match the
+            # clipped geometry, so 'flowpath-attributes' stays consistent with the
+            # clipped 'flowpath' layer (the dam sits mid-reach, so the full-reach
+            # values from the source hydrofabric no longer apply). Both are linear
+            # in reach length: 'Length_m' is the reach length, and 'MusK' is the
+            # Muskingum travel-time parameter (K = reach length / wave celerity).
+            if clip_frac < 1.0:
+                fa_start_mask = fa_subset["id"] == starting_id
+                if fa_start_mask.any():
+                    fa_idx = fa_subset.index[fa_start_mask][0]
+                    for length_scaled_col in ("Length_m", "MusK"):
+                        if length_scaled_col not in fa_subset.columns:
+                            continue
+                        original_val = fa_subset.at[fa_idx, length_scaled_col]
+                        scaled_val = original_val * clip_frac
+                        fa_subset.at[fa_idx, length_scaled_col] = scaled_val
+                        logger.info(
+                            "Starting reach '%s' %s rescaled: %.4g -> %.4g.",
+                            starting_id,
+                            length_scaled_col,
+                            original_val,
+                            scaled_val,
+                        )
+
             fa_subset.to_file(
                 str(self.output_path), driver="GPKG", layer="flowpath-attributes"
             )
@@ -512,7 +648,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "output_file_name",
         nargs="?",
-        default=str(project_root / "outputs" / "mdd_downstream_flowpath.gpkg"),
+        default=str(project_root / "outputs" / "mdd_downstream_flowpath_v3.gpkg"),
         help="Destination path for the output flowpath GeoPackage.",
     )
     parser.add_argument(
