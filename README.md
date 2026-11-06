@@ -110,7 +110,7 @@ The `data/` directory is not in the repository; create it next to the project ro
 
 #### Dam inputs
 
-- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile`.
+- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile` (a bare filename is looked up in the dam folder).
 - **Stage data**: `stage.txt`, the stage heights (m) used to build the rating curves.
 - **Forecast data** (optional): `forecast.csv` with per-reach discharge (`Id, flow_m3s`), keyed to the reach IDs of the current `dam_hand` run. You can supply it later through `dam_inundation --forecast-file`.
 - **Outlet locations** (optional): `Outlets2_utm.shp`, defining the reach outlets. It is not needed when `dam_hand` runs with `--segment-length`.
@@ -122,7 +122,7 @@ Download the NHDPlus HR geodatabase and raster set for the HU4 that contains the
 - **HU4 geodatabase**: the single `*.gdb` with a `WBDHU12` layer, directly in the dam folder or one subfolder down, for example `NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb`. It provides the `WBDHU12` layer for the downstream HUC12 walk, and the `NHDWaterbody` layer for the lake/reservoir stop. Other geodatabases, such as `elev_source.gdb` in the raster folder, are ignored.
 - **HU4 raster folder**: the single subfolder containing `hydrodem.tif`, for example `NHDPLUS_H_1602_HU4_20220412_RASTER/` (it also holds `fdr.tif`, `elev_cm.tif`, and so on).
 
-To use NHDPlus data stored elsewhere, pass `--huc12-gdb` and `--raster-dir` to `dam_catchments`. You can also symlink the folders into the dam folder.
+To use NHDPlus data stored elsewhere, pass `--huc12-gdb` and `--raster-dir` to `dam_catchments`. A bare name (no directory part) is looked up in the dam folder; any other relative path, including `./name`, is taken from the current directory. You can also symlink the folders into the dam folder.
 
 #### Example directory structure
 
@@ -180,9 +180,9 @@ Only one HU4 is supported. If the river leaves the HU4 before the distance limit
 **Arguments:**
 
 - `--dam-dir` (required): Per-dam input directory.
-- `--dam-shapefile`: Dam location shapefile (default: found in `--dam-dir`).
-- `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam (default: found in `--dam-dir`).
-- `--raster-dir`: NHDPlus HR HU4 raster directory to clip (default: found in `--dam-dir`).
+- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `--dam-dir` (default: found in `--dam-dir`).
+- `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam; a bare name is looked up in `--dam-dir` (default: found in `--dam-dir`).
+- `--raster-dir`: NHDPlus HR HU4 raster directory to clip; a bare name is looked up in `--dam-dir` (default: found in `--dam-dir`).
 - `--ref-projection-raster`: Reference raster for the target projection (default: `<raster-dir>/hydrodem.tif`).
 - `--max-distance`: Maximum downstream distance in km (default: 100).
 - `--buffer`: Extension distance (meters) around the bounding box (default: 4000).
@@ -231,7 +231,7 @@ This command will:
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
 - `--dam-dir` (required): Per-dam input directory.
-- `--dam-shapefile`: Dam location shapefile (default: found in `--dam-dir`).
+- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `--dam-dir` (default: found in `--dam-dir`).
 - `--output-dir`: Directory to save HAND results (default: `outputs/<dam>`).
 - `--clipped-dir`: Folder containing clipped rasters from step 1 (default: `<output-dir>/clipped`).
 - `--outlets-on-reaches`: Name of outlets shapefile in `--dam-dir`
@@ -342,7 +342,7 @@ Whitespace after commas is allowed, and extra columns are ignored. A script that
 
 - `--taudem-path`, `--output-dir`, `--np`: As for `dam_hydroprop`.
 - `--hand-raster`, `--catch-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`).
-- `--forecast-file`: Forecast flows (default `forecast.csv`).
+- `--forecast-file`: Forecast flows. A bare filename is looked up in `--dam-dir`; any other path is relative to the current directory (default `forecast.csv` in the output dir).
 - `--hydroprop-file`: Table from `dam_hydroprop` (default `hydroprop.csv`).
 - `--catchlist`: Reach list used for the ID check (default `catchlist.csv`).
 - `--inundation-raster`, `--depth-table`: Outputs (defaults `inundepth.tif`, `depths.csv`).

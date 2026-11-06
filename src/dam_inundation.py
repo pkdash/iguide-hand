@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import setup_taudem_path, run_taudem_command, default_output_dir
+from utils import setup_taudem_path, run_taudem_command, default_output_dir, resolve_user_path
 
 
 # Configure logging
@@ -184,6 +184,7 @@ class DamInundationAnalysis:
         inundation_raster=None,
         depth_table=None,
         np=4,
+        dam_dir=None,
     ):
         """
         Initialize the inundation analysis.
@@ -194,12 +195,15 @@ class DamInundationAnalysis:
                 working directory and the default location of every file below
             hand_raster: HAND raster (default: <output_dir>/hand.tif)
             catch_raster: Reach catchment raster (default: <output_dir>/w2.tif)
-            forecast_file: Forecast flows CSV (default: <output_dir>/forecast.csv)
+            forecast_file: Forecast flows CSV. A bare filename is looked up in dam_dir (if
+                given); other relative paths resolve from the current directory
+                (default: <output_dir>/forecast.csv)
             hydroprop_file: Hydraulic properties table (default: <output_dir>/hydroprop.csv)
             catchlist: Reach list CSV, used for ID checks (default: <output_dir>/catchlist.csv)
             inundation_raster: Output depth raster (default: <output_dir>/inundepth.tif)
             depth_table: Output depth summary (default: <output_dir>/depths.csv)
             np: Number of MPI processes
+            dam_dir: Per-dam input directory, used only to look up a bare --forecast-file name
         """
         self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -209,7 +213,10 @@ class DamInundationAnalysis:
 
         self.hand_raster = _resolve(hand_raster, "hand.tif")
         self.catch_raster = _resolve(catch_raster, "w2.tif")
-        self.forecast_file = _resolve(forecast_file, "forecast.csv")
+        if forecast_file and dam_dir:
+            self.forecast_file = resolve_user_path(forecast_file, dam_dir)
+        else:
+            self.forecast_file = _resolve(forecast_file, "forecast.csv")
         self.hydroprop_file = _resolve(hydroprop_file, "hydroprop.csv")
         self.catchlist = _resolve(catchlist, "catchlist.csv")
         self.inundation_raster = _resolve(inundation_raster, "inundepth.tif")
@@ -337,7 +344,9 @@ def main():
     parser.add_argument("--catch-raster", help="Reach catchment raster (default: <output-dir>/w2.tif)")
     parser.add_argument(
         "--forecast-file",
-        help=f"Forecast CSV with columns '{FORECAST_ID_COL}, {FORECAST_FLOW_COL}' (default: <output-dir>/forecast.csv)"
+        help=f"Forecast CSV with columns '{FORECAST_ID_COL}, {FORECAST_FLOW_COL}'; a bare filename is "
+             "looked up in --dam-dir, other paths are relative to the current directory "
+             "(default: <output-dir>/forecast.csv)"
     )
     parser.add_argument("--hydroprop-file", help="Hydraulic properties table (default: <output-dir>/hydroprop.csv)")
     parser.add_argument("--catchlist", help="Reach list CSV for reach-ID checks (default: <output-dir>/catchlist.csv)")
@@ -369,6 +378,7 @@ def main():
         inundation_raster=args.inundation_raster,
         depth_table=args.depth_table,
         np=args.np,
+        dam_dir=args.dam_dir,
     ).run_analysis()
 
 

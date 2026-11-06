@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 import rasterio
 
-from utils import (find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir,
+from utils import (resolve_user_path, find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir,
                    default_output_dir, write_run_info)
 
 # Logger will be configured in main()
@@ -653,7 +653,8 @@ def parse_arguments():
     parser.add_argument(
         "--dam-shapefile",
         default=None,
-        help="Dam location shapefile (default: found in --dam-dir)"
+        help="Dam location shapefile; a bare filename is looked up in --dam-dir "
+             "(default: found in --dam-dir)"
     )
 
     parser.add_argument(
@@ -755,11 +756,11 @@ def main():
         sys.exit(1)
     try:
         dam_shapefile = (find_dam_shapefile(dam_dir) if args.dam_shapefile is None
-                         else Path(args.dam_shapefile).expanduser().resolve())
+                         else resolve_user_path(args.dam_shapefile, dam_dir))
         huc12_gdb = (find_nhdplus_gdb(dam_dir) if args.huc12_gdb is None
-                     else Path(args.huc12_gdb).expanduser().resolve())
+                     else resolve_user_path(args.huc12_gdb, dam_dir))
         raster_dir = (find_nhdplus_raster_dir(dam_dir) if args.raster_dir is None
-                      else Path(args.raster_dir).expanduser().resolve())
+                      else resolve_user_path(args.raster_dir, dam_dir))
     except FileNotFoundError as e:
         logger.error(str(e))
         sys.exit(1)

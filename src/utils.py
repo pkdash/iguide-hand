@@ -21,6 +21,20 @@ RUN_INFO_FILE = "run_info.json"
 DAM_SHAPEFILE_NAME = "dam_location.shp"
 
 
+def resolve_user_path(value, dam_dir):
+    """
+    Resolve a user-supplied path flag. A bare name (no directory part, e.g. my_dam.shp)
+    is looked up in dam_dir; absolute paths and paths with a directory part (./x, sub/x)
+    resolve as usual (relative to the current directory).
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute() and path.parent == Path("."):
+        # "./x" also has parent "." but was typed explicitly relative to the CWD
+        if not str(value).startswith(("./", ".\\")):
+            path = Path(dam_dir) / path
+    return path.resolve()
+
+
 def find_dam_shapefile(dam_dir):
     """
     Locate the dam location shapefile in a per-dam data directory.

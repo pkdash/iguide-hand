@@ -18,7 +18,7 @@ import pandas as pd
 from pathlib import Path
 import rasterio
 from rasterio.features import rasterize
-from utils import (setup_taudem_path, run_taudem_command, find_dam_shapefile,
+from utils import (resolve_user_path, setup_taudem_path, run_taudem_command, find_dam_shapefile,
                    find_nhdplus_gdb, default_output_dir, read_run_info)
 from generate_segment_outlets import SegmentOutletGenerator, default_waterbody_path
 
@@ -83,7 +83,7 @@ class HandDamWorkflow:
                             else Path(clipped_dir).expanduser().resolve())
         self.outlets_on_reaches = outlets_on_reaches
         self.dam_shapefile = (find_dam_shapefile(self.dam_dir) if dam_shapefile is None
-                              else Path(dam_shapefile).expanduser().resolve())
+                              else resolve_user_path(dam_shapefile, self.dam_dir))
         self.stream_threshold = stream_threshold
         self.move_outlet_distance = move_outlet_distance
         self.num_processes = num_processes
@@ -640,7 +640,8 @@ def main():
     parser.add_argument(
         "--dam-shapefile",
         default=None,
-        help="Dam location shapefile (default: dam_location.shp, or the single "
+        help="Dam location shapefile; a bare filename is looked up in --dam-dir "
+             "(default: dam_location.shp, or the single "
              "*dam_location.shp, in --dam-dir)"
     )
 
