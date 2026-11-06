@@ -19,6 +19,7 @@ from pathlib import Path
 import rasterio
 from rasterio.features import rasterize
 from utils import setup_taudem_path, run_taudem_command
+from generate_segment_outlets import DEFAULT_WATERBODY_GDB, SegmentOutletGenerator
 
 
 # Configure logging
@@ -34,7 +35,10 @@ class HandDamWorkflow:
 
     def __init__(self, taudem_path="$HOME/taudem", output_dir="outputs",
                  data_dir="data", clipped_dir="outputs/clipped",
-                 outlets_on_reaches="Outlets2_utm.shp"):
+                 outlets_on_reaches="Outlets2_utm.shp", segment_length=None,
+                 min_segment_length=None, confluence_ratio=None, min_slope=1e-5,
+                 max_distance=None, waterbody_path=None,
+                 min_waterbody_area_km2=10.0):
         """
         Initialize the workflow.
 
@@ -44,12 +48,39 @@ class HandDamWorkflow:
             data_dir: Input data directory
             clipped_dir: Directory containing clipped rasters
             outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
+                (ignored when segment_length is set)
+            segment_length: If set, generate outlets every this many meters along the dam's
+                main stem instead of using outlets_on_reaches
+            min_segment_length: Shortest generated reach in meters (default: 0.5 * segment_length)
+            confluence_ratio: If set, also break generated reaches above confluences where
+                contributing area grows by more than this fraction
+            min_slope: Reach slopes below this value are raised to it in catchlist.csv
+            max_distance: With segment_length, end the main stem this many meters below the dam
+                (overrides the waterbody stop)
+            waterbody_path: With segment_length, NHDPlus HR GDB whose NHDWaterbody layer ends the
+                main stem just upstream of the first large lake/reservoir. Default (None):
+                the 1602 HU4 GDB under data_dir, skipped with a warning if missing. An
+                explicit path must exist.
+            min_waterbody_area_km2: Smallest lake/reservoir (km2) that ends the main stem
         """
         self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
         self.data_dir = Path(data_dir).resolve()
         self.clipped_dir = Path(clipped_dir).resolve()
         self.outlets_on_reaches = outlets_on_reaches
+        self.segment_length = segment_length
+        self.min_segment_length = min_segment_length
+        self.confluence_ratio = confluence_ratio
+        self.min_slope = min_slope
+        self.max_distance = max_distance
+        self.waterbody_required = waterbody_path is not None
+        self.waterbody_path = (self.data_dir / DEFAULT_WATERBODY_GDB if waterbody_path is None
+                               else Path(waterbody_path).resolve())
+        self.min_waterbody_area_km2 = min_waterbody_area_km2
+        # Fail before the TauDEM steps rather than at outlet generation
+        if (self.waterbody_required and segment_length is not None and max_distance is None
+                and not self.waterbody_path.exists()):
+            raise FileNotFoundError(f"Waterbody file not found: {self.waterbody_path}")
 
         # Ensure output directory exists
         self.output_dir.mkdir(exist_ok=True)
@@ -85,16 +116,24 @@ class HandDamWorkflow:
         """Copy required input files from data directory."""
         logger.info("Copying input files...")
 
-        # Copy stage.txt and forecast.csv
-        for filename in ["stage.txt", "forecast.csv"]:
-            src_file = self.data_dir / filename
-            dest_file = self.output_dir / filename
-            if src_file.exists():
-                shutil.copy2(src_file, dest_file)
-                logger.info(f"Copied {filename}")
-            else:
-                logger.error(f"Required input file not found: {src_file}")
-                sys.exit(1)
+        # stage.txt is required (input to dam_hydroprop)
+        src_file = self.data_dir / "stage.txt"
+        if not src_file.exists():
+            logger.error(f"Required input file not found: {src_file}")
+            sys.exit(1)
+        shutil.copy2(src_file, self.output_dir / "stage.txt")
+        logger.info("Copied stage.txt")
+
+        # forecast.csv is optional here: it is keyed to this run's reach IDs, so it
+        # is usually generated after dam_hand and passed to dam_inundation directly
+        src_file = self.data_dir / "forecast.csv"
+        if src_file.exists():
+            shutil.copy2(src_file, self.output_dir / "forecast.csv")
+            logger.info("Copied forecast.csv")
+        else:
+            logger.info(
+                f"No forecast.csv in {self.data_dir}; supply one to dam_inundation via --forecast-file"
+            )
 
     def create_flow_direction_mask(self):
         """Create masked flow direction raster where hydrodem < 0."""
@@ -379,29 +418,46 @@ class HandDamWorkflow:
             "HAND calculation"
         )
 
+    def generate_segment_outlets(self):
+        """Generate Outlets2_geo.shp every segment_length meters along the dam's main stem."""
+        generator = SegmentOutletGenerator(
+            work_dir=self.output_dir,
+            segment_length=self.segment_length,
+            min_segment_length=self.min_segment_length,
+            confluence_ratio=self.confluence_ratio,
+            max_distance=self.max_distance,
+            waterbody_path=self.waterbody_path,
+            min_waterbody_area_km2=self.min_waterbody_area_km2,
+            waterbody_required=self.waterbody_required,
+        )
+        generator.generate(output_path=self.output_dir / "Outlets2_geo.shp")
+
     def process_additional_outlets(self):
         """Process additional outlets for stream network analysis."""
         logger.info("Processing additional outlets...")
 
-        # Project Outlets2_utm to raster coordinate system
-        outlets2_utm = self.output_dir / "Outlets2_utm.shp"
-        fel_raster = self.output_dir / "fel.tif"
         outlets2_geo = self.output_dir / "Outlets2_geo.shp"
 
-        # Read Outlets2_utm
-        outlets_gdf = gpd.read_file(outlets2_utm)
+        if self.segment_length is None:
+            # Project user-supplied Outlets2_utm to raster coordinate system
+            outlets2_utm = self.output_dir / "Outlets2_utm.shp"
+            fel_raster = self.output_dir / "fel.tif"
 
-        # Get target CRS from fel.tif
-        with rasterio.open(fel_raster) as src:
-            target_crs = src.crs
+            # Read Outlets2_utm
+            outlets_gdf = gpd.read_file(outlets2_utm)
 
-        # Reproject to target CRS
-        outlets_projected = outlets_gdf.to_crs(target_crs)
+            # Get target CRS from fel.tif
+            with rasterio.open(fel_raster) as src:
+                target_crs = src.crs
 
-        # Save projected shapefile
-        outlets_projected.to_file(outlets2_geo)
+            # Reproject to target CRS
+            outlets_projected = outlets_gdf.to_crs(target_crs)
 
-        logger.info(f"Created Outlets2_geo.shp: {outlets2_geo}")
+            # Save projected shapefile
+            outlets_projected.to_file(outlets2_geo)
+
+            logger.info(f"Created Outlets2_geo.shp: {outlets2_geo}")
+        # else: generated outlets are already in the raster CRS and on src.tif cells
 
         # Move outlets to streams with maximum distance
         self.run_taudem_command(
@@ -451,9 +507,16 @@ class HandDamWorkflow:
         # Create catchment list dataframe
         catchlist_data = []
         for _, row in filtered_gdf.iterrows():
+            slope = row['Slope']
+            if self.min_slope is not None and slope < self.min_slope:
+                logger.warning(
+                    f"Reach {row['LINKNO']}: slope {slope:.2e} below minimum; "
+                    f"set to {self.min_slope:.2e}"
+                )
+                slope = self.min_slope
             catchlist_data.append({
                 'Id': row['LINKNO'],
-                'Slope': row['Slope'],
+                'Slope': slope,
                 'Length': row['Length'],
                 'Manning_n': 0.05
             })
@@ -472,7 +535,8 @@ class HandDamWorkflow:
             # Phase 1: Data preparation
             self.copy_clipped_rasters()
             self.copy_input_files()
-            self.copy_outlets_on_reaches()
+            if self.segment_length is None:
+                self.copy_outlets_on_reaches()
 
             # Phase 2: Flow direction processing
             self.create_flow_direction_mask()
@@ -494,11 +558,16 @@ class HandDamWorkflow:
             self.run_taudem_phase4()
 
             # Phase 7: Additional outlets and stream network
+            if self.segment_length is not None:
+                self.generate_segment_outlets()
             self.process_additional_outlets()
             self.create_catchment_list()
 
             logger.info("HAND Dam Workflow completed successfully!")
-            logger.info("To run inundation analysis, use the dam_inundation.py script.")
+            logger.info(
+                "Next: run dam_hydroprop (hydraulic properties), then dam_inundation "
+                "(inundation depth for a forecast)."
+            )
 
         except Exception as e:
             logger.error(f"Workflow failed: {str(e)}")
@@ -538,7 +607,62 @@ def main():
     parser.add_argument(
         "--outlets-on-reaches",
         default="Outlets2_utm.shp",
-        help="Name of user-supplied outlets shapefile in data directory (default: Outlets2_utm.shp)"
+        help="Name of user-supplied outlets shapefile in data directory (default: Outlets2_utm.shp). "
+             "Ignored when --segment-length is set"
+    )
+
+    parser.add_argument(
+        "--segment-length",
+        type=float,
+        default=None,
+        help="Generate outlets every this many meters along the dam's downstream main stem "
+             "(e.g. 2000) instead of using --outlets-on-reaches"
+    )
+
+    parser.add_argument(
+        "--min-segment-length",
+        type=float,
+        default=None,
+        help="Shortest generated reach in meters; shorter pieces are merged (default: 0.5 * segment length)"
+    )
+
+    parser.add_argument(
+        "--confluence-ratio",
+        type=float,
+        default=None,
+        help="With --segment-length, also break above confluences where contributing area grows "
+             "by more than this fraction in one cell step, e.g. 0.2 (default: off)"
+    )
+
+    parser.add_argument(
+        "--max-distance",
+        type=float,
+        default=None,
+        help="With --segment-length, end the main stem this many meters below the dam; "
+             "overrides the waterbody stop (default: off)"
+    )
+
+    parser.add_argument(
+        "--waterbody-path",
+        default=None,
+        help="With --segment-length, NHDPlus HR GDB whose NHDWaterbody layer ends the main stem "
+             f"just upstream of the first large lake/reservoir (default: <data-dir>/{DEFAULT_WATERBODY_GDB}, "
+             "skipped with a warning if missing; an explicit path must exist; "
+             "ignored with --max-distance)"
+    )
+
+    parser.add_argument(
+        "--min-waterbody-area",
+        type=float,
+        default=10.0,
+        help="Smallest lake/reservoir in km2 that ends the main stem (default: 10)"
+    )
+
+    parser.add_argument(
+        "--min-slope",
+        type=float,
+        default=1e-5,
+        help="Reach slopes below this are raised to it in catchlist.csv (default: 1e-5)"
     )
 
     parser.add_argument(
@@ -559,7 +683,14 @@ def main():
         output_dir=args.output_dir,
         data_dir=args.data_dir,
         clipped_dir=args.clipped_dir,
-        outlets_on_reaches=args.outlets_on_reaches
+        outlets_on_reaches=args.outlets_on_reaches,
+        segment_length=args.segment_length,
+        min_segment_length=args.min_segment_length,
+        confluence_ratio=args.confluence_ratio,
+        min_slope=args.min_slope,
+        max_distance=args.max_distance,
+        waterbody_path=args.waterbody_path,
+        min_waterbody_area_km2=args.min_waterbody_area,
     )
 
     workflow.run_workflow()

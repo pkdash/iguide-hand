@@ -15,7 +15,9 @@ where = ["src"]
 [project.scripts]
 dam_catchments = "dam_catchments:main"
 dam_hand = "dam_hand:main"
+dam_hydroprop = "dam_hydroprop:main"
 dam_inundation = "dam_inundation:main"
+dam_outlets = "generate_segment_outlets:main"
 
 [tool.uv]
 package = true
