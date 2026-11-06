@@ -158,15 +158,19 @@ class HandDamWorkflow:
         shutil.copy2(src_file, self.output_dir / "stage.txt")
         logger.info("Copied stage.txt")
 
-        # forecast.csv is optional here: it is keyed to this run's reach IDs, so it
-        # is usually generated after dam_hand and passed to dam_inundation directly
+        # forecast.csv is optional here: it is keyed to this run's reach IDs
+        # (LINKNO), so it must match the current run. Use your own forecast.csv
+        # (Id, flow_m3s) if you have one that matches, or generate one (e.g. a
+        # uniform-flow forecast) after dam_hand. Either way it can be passed to
+        # dam_inundation directly via --forecast-file.
         src_file = self.dam_dir / "forecast.csv"
         if src_file.exists():
             shutil.copy2(src_file, self.output_dir / "forecast.csv")
             logger.info("Copied forecast.csv")
         else:
             logger.info(
-                f"No forecast.csv in {self.dam_dir}; supply one to dam_inundation via --forecast-file"
+                f"No forecast.csv in {self.dam_dir}; pass your own (or a generated) forecast "
+                "matching this run's reach IDs to dam_inundation via --forecast-file"
             )
 
     def create_flow_direction_mask(self):
