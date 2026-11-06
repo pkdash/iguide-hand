@@ -7,7 +7,8 @@ This script:
 2. Finds the starting HUC12 containing the dam
 3. Traverses downstream HUC12s using connectivity data
 4. Calculates cumulative distance using sqrt(area) formula
-5. Stops at 100km distance or CLOSED BASIN, whichever comes first
+5. Stops at --max-distance (default 100 km), a CLOSED BASIN, or the edge of the HU4
+   GDB (with a warning), whichever comes first
 6. Computes bounding box in reference raster projection
 7. Optionally clips all NHDPlus rasters in a directory to the bounding box
 """
@@ -22,8 +23,15 @@ import logging
 from pathlib import Path
 import rasterio
 
+from utils import (find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir,
+                   default_output_dir, write_run_info)
+
 # Logger will be configured in main()
 logger = logging.getLogger(__name__)
+
+# A dam outside every HUC12 but within this distance (e.g. on a boundary) starts from the
+# nearest HUC12; farther away it is almost certainly in a different HU4 than --huc12-gdb
+MAX_DAM_HUC12_OFFSET_M = 1000.0
 
 
 class HUC12BoundingBoxCalculator:
@@ -51,7 +59,7 @@ class HUC12BoundingBoxCalculator:
         self.huc12_gdb_path = Path(huc12_gdb_path).resolve()
         self.ref_projection_raster_path = Path(ref_projection_raster_path).resolve()
         self.output_dir = Path(output_dir).resolve()
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Raster clipping parameters
         self.raster_dir = Path(raster_dir).resolve() if raster_dir else None
@@ -65,6 +73,7 @@ class HUC12BoundingBoxCalculator:
         self.downstream_huc12s = []
         self.total_distance = 0.0
         self.max_distance_km = 100.0
+        self.stop_reason = None
 
         # Raster clipping results
         self.clipped_rasters = []
@@ -152,10 +161,18 @@ class HUC12BoundingBoxCalculator:
             logger.warning("Dam not contained in any HUC12, finding nearest...")
             distances = self.huc12_data.geometry.distance(dam_point)
             nearest_idx = distances.idxmin()
+            nearest_dist = distances.min()
             starting_huc12 = self.huc12_data.loc[nearest_idx]
+            if nearest_dist > MAX_DAM_HUC12_OFFSET_M:
+                raise ValueError(
+                    f"Dam is {nearest_dist / 1000:.1f} km from the nearest HUC12 "
+                    f"({starting_huc12[self.huc12_key_name_huc12]}) in {self.huc12_gdb_path.name}; "
+                    "it is probably in a different HU4. Pass the --huc12-gdb and --raster-dir "
+                    "for the HU4 that contains the dam."
+                )
             logger.info(
                 f"Nearest HUC12: {starting_huc12[self.huc12_key_name_huc12]} "
-                f"(distance: {distances.iloc[nearest_idx]:.2f}m)"
+                f"(distance: {nearest_dist:.2f}m)"
             )
         elif len(containing_huc12s) == 1:
             starting_huc12 = containing_huc12s.iloc[0]
@@ -193,6 +210,7 @@ class HUC12BoundingBoxCalculator:
             # Check for infinite loop
             if current_huc12_id in visited_huc12s:
                 logger.warning(f"Circular reference detected at HUC12 {current_huc12_id}, stopping")
+                self.stop_reason = f"circular tohuc reference at HUC12 {current_huc12_id}"
                 break
 
             visited_huc12s.add(current_huc12_id)
@@ -206,6 +224,8 @@ class HUC12BoundingBoxCalculator:
                     f"Distance limit ({self.max_distance_km} km) would be exceeded, "
                     f"stopping at HUC12 {current_huc12_id}"
                 )
+                self.stop_reason = (f"distance limit ({self.max_distance_km:g} km) "
+                                    f"reached before HUC12 {current_huc12_id}")
                 break
 
             # Add current HUC12 to downstream list
@@ -221,6 +241,7 @@ class HUC12BoundingBoxCalculator:
             tohuc = current_huc12[self.huc12_key_name_tohuc]
             if pd.isna(tohuc) or tohuc == 'CLOSED BASIN' or tohuc == '':
                 logger.info(f"Reached terminal basin at HUC12 {current_huc12_id}")
+                self.stop_reason = f"terminal basin at HUC12 {current_huc12_id} (tohuc: {tohuc})"
                 break
 
             # Find next HUC12
@@ -228,12 +249,27 @@ class HUC12BoundingBoxCalculator:
                 next_idx = self.huc12_lookup[tohuc]
                 current_huc12 = self.huc12_data.iloc[next_idx]
             else:
-                logger.warning(f"Next HUC12 {tohuc} not found in dataset, stopping")
+                next_hu4 = str(tohuc)[:4]
+                self.stop_reason = (
+                    f"left the HU4 GDB: next HUC12 {tohuc} (HU4 {next_hu4}) is not in "
+                    f"{self.huc12_gdb_path.name}"
+                )
+                logger.warning("=" * 70)
+                logger.warning(
+                    f"Downstream walk left the HU4 dataset: HUC12 {current_huc12_id} drains to "
+                    f"{tohuc} (HU4 {next_hu4}), which is not in {self.huc12_gdb_path.name}."
+                )
+                logger.warning(
+                    f"Domain is truncated at {self.total_distance:.2f} km of the "
+                    f"{self.max_distance_km:g} km limit. Only a single HU4 is supported; "
+                    f"results stop at the HU4 boundary."
+                )
+                logger.warning("=" * 70)
                 break
 
         logger.info(
             f"Traversal complete: {len(self.downstream_huc12s)} HUC12s, "
-            f"total distance: {self.total_distance:.2f} km"
+            f"total distance: {self.total_distance:.2f} km, stopped: {self.stop_reason}"
         )
 
 
@@ -497,6 +533,7 @@ class HUC12BoundingBoxCalculator:
             f.write("Analysis Results:\n")
             f.write(f"  Number of downstream HUC12s: {len(self.downstream_huc12s)}\n")
             f.write(f"  Total distance traveled: {self.total_distance:.2f} km\n")
+            f.write(f"  Stop reason: {self.stop_reason}\n")
             if self.clipped_rasters or self.failed_rasters:
                 f.write(
                     f"  Clipped rasters: {len(self.clipped_rasters)} successful, "
@@ -537,7 +574,7 @@ class HUC12BoundingBoxCalculator:
             f.write("-" * 25 + "\n")
             for i, huc12 in enumerate(self.downstream_huc12s, 1):
                 distance_contrib = self.calculate_huc12_distance(huc12)
-                f.write(f"{i:2d}. HUC12: {huc12[self.huc12_key_name_name]} | "
+                f.write(f"{i:2d}. HUC12: {huc12[self.huc12_key_name_huc12]} | "
                        f"Name: {huc12[self.huc12_key_name_name][:40]:<40} | "
                        f"Area: {huc12[self.huc12_key_name_areasqkm]:8.2f} km² | "
                        f"Distance: {distance_contrib:6.2f} km | "
@@ -566,6 +603,13 @@ class HUC12BoundingBoxCalculator:
 
             # Save outputs
             self.save_outputs(bounding_box)
+            write_run_info(
+                self.output_dir,
+                dam_shapefile=self.dam_shapefile,
+                huc12_gdb=self.huc12_gdb_path,
+                raster_dir=self.raster_dir,
+                clipped_dir=self.clipped_dir if self.raster_dir else None,
+            )
 
             logger.info("Analysis completed successfully!")
             return bounding_box
@@ -582,58 +626,60 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
             Examples:
-            # Use default files (bounding box only)
-            python %(prog)s
+            # data/my_dam holds the dam shapefile plus its own NHDPlus HR HU4 data:
+            #   NHDPLUS_H_XXXX_HU4_GDB/NHDPLUS_H_XXXX_HU4_GDB.gdb and NHDPLUS_H_XXXX_HU4_RASTER/
+            # Bounding box + clipped rasters into outputs/my_dam/clipped
+            python %(prog)s --dam-dir data/my_dam
 
-            # Specify custom dam location
-            python %(prog)s --dam-shapefile my_dam.shp
+            # Change maximum distance, buffer, and output directory
+            python %(prog)s --dam-dir data/my_dam --max-distance 50 --buffer 1000 \\
+                --output-dir results/my_dam
 
-            # Change maximum distance and output directory
-            python %(prog)s --max-distance 50 --output-dir results
+            # Use NHDPlus data stored elsewhere
+            python %(prog)s --dam-dir data/my_dam --huc12-gdb /path/to/hu4.gdb --raster-dir /path/to/hu4_rasters
 
-            # Enable raster clipping with calculated bounding box
-            python %(prog)s --clip-rasters
-
-            # Raster clipping with 1km buffer around bounding box
-            python %(prog)s --clip-rasters --buffer 1000
-
-            # Custom raster directories and clipping
-            python %(prog)s --clip-rasters --raster-dir /path/to/rasters --clipped-dir my_clipped
-
-            # Combined: custom distance, clipping with buffer, and custom output
-            python %(prog)s --max-distance 75 --clip-rasters --buffer 500 --output-dir results
-
-            # Use different HUC12 database and reference raster
-            python %(prog)s --huc12-gdb /path/to/huc12.gdb --ref-projection-raster /path/to/dem.tif
+            # Bounding box only, no raster clipping
+            python %(prog)s --dam-dir data/my_dam --no-clip-rasters
         """
     )
 
     parser.add_argument(
+        "--dam-dir",
+        required=True,
+        help="Per-dam input directory, e.g. data/<dam>, holding dam_location.shp "
+             "(or a single *dam_location.shp) and the dam's NHDPlus HR HU4 GDB and raster folder"
+    )
+
+    parser.add_argument(
         "--dam-shapefile",
-        default="data/mountain_dell_dam_location.shp",
-        # default="data/beach_city_dam/beach_city_dam_location.shp",
-        help="Path to dam location shapefile (default: %(default)s)"
+        default=None,
+        help="Dam location shapefile (default: found in --dam-dir)"
     )
 
     parser.add_argument(
         "--huc12-gdb",
-        default="data/NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb",
-        # default="data/NHDPLUS_H_0503_HU4_GDB/NHDPLUS_H_0503_HU4_GDB.gdb",
-        help="Path to HUC12 geodatabase (default: %(default)s)"
+        default=None,
+        help="NHDPlus HR HU4 geodatabase with the WBDHU12 layer for the dam's HU4 "
+             "(default: the single *.gdb in --dam-dir or one folder down)"
+    )
+
+    parser.add_argument(
+        "--raster-dir",
+        default=None,
+        help="NHDPlus HR HU4 raster directory (hydrodem.tif, fdr.tif, ...) to clip "
+             "(default: the single subfolder of --dam-dir containing hydrodem.tif)"
     )
 
     parser.add_argument(
         "--ref-projection-raster",
-        default="data/NHDPLUS_H_1602_HU4_20220412_RASTER/hydrodem.tif",
-        # default="data/NHDPLUS_H_0503_HU4_RASTER/hydrodem.tif",
-        help="Path to reference raster for target projection (default: %(default)s)"
+        default=None,
+        help="Reference raster for the target projection (default: <raster-dir>/hydrodem.tif)"
     )
 
     parser.add_argument(
         "--output-dir",
-        default="outputs",
-        # default="outputs_beach_city",
-        help="Output directory for results (default: %(default)s)"
+        default=None,
+        help="Output directory for results (default: outputs/<dam-dir name>)"
     )
 
     parser.add_argument(
@@ -657,23 +703,15 @@ def parse_arguments():
 
     # Raster clipping arguments
     parser.add_argument(
-        "--clip-rasters",
-        action="store_true",
-        default=True,
-        help="Enable raster clipping using calculated bounding box"
-    )
-
-    parser.add_argument(
-        "--raster-dir",
-        default="data/NHDPLUS_H_1602_HU4_20220412_RASTER", # Default raster directory
-        # default="data/NHDPLUS_H_0503_HU4_RASTER", # Default raster directory
-        help="Directory containing rasters to clip (default: %(default)s)"
+        "--no-clip-rasters",
+        dest="clip_rasters",
+        action="store_false",
+        help="Only compute the bounding box; do not clip the rasters in --raster-dir"
     )
 
     parser.add_argument(
         "--clipped-dir",
         default="clipped",
-        # default="clipped_beach_city",
         help="Subdirectory name within output-dir for clipped rasters (default: %(default)s)"
     )
 
@@ -681,7 +719,7 @@ def parse_arguments():
         "--buffer",
         type=float,
         default=4000,
-        help="Buffer distance in meters to add around bounding box (optional)"
+        help="Buffer distance in meters to add around bounding box (default: %(default)s)"
     )
 
     return parser.parse_args()
@@ -711,17 +749,34 @@ def main():
     setup_logging(args.verbose, args.quiet)
 
     # Convert paths to absolute and check if files exist
-    dam_shapefile = Path(args.dam_shapefile).resolve()
-    huc12_gdb = Path(args.huc12_gdb).resolve()
-    ref_projection_raster = Path(args.ref_projection_raster).resolve()
-    
+    dam_dir = Path(args.dam_dir).expanduser().resolve()
+    if not dam_dir.is_dir():
+        logger.error(f"Dam directory not found: {dam_dir}")
+        sys.exit(1)
+    try:
+        dam_shapefile = (find_dam_shapefile(dam_dir) if args.dam_shapefile is None
+                         else Path(args.dam_shapefile).expanduser().resolve())
+        huc12_gdb = (find_nhdplus_gdb(dam_dir) if args.huc12_gdb is None
+                     else Path(args.huc12_gdb).expanduser().resolve())
+        raster_dir = (find_nhdplus_raster_dir(dam_dir) if args.raster_dir is None
+                      else Path(args.raster_dir).expanduser().resolve())
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    ref_projection_raster = (raster_dir / "hydrodem.tif" if args.ref_projection_raster is None
+                             else Path(args.ref_projection_raster).expanduser().resolve())
+    output_dir = (default_output_dir(dam_dir) if args.output_dir is None
+                  else Path(args.output_dir).expanduser().resolve())
+
     logger.info(f"Working directory: {Path.cwd()}")
+    logger.info(f"Dam directory: {dam_dir}")
+    logger.info(f"Output directory: {output_dir}")
     logger.info(f"Dam shapefile: {dam_shapefile}")
     logger.info(f"HUC12 GDB: {huc12_gdb}")
     logger.info(f"Reference raster: {ref_projection_raster}")
 
     # Validate required files exist
-    for filepath in [dam_shapefile, huc12_gdb, ref_projection_raster]:
+    for filepath in [dam_shapefile, huc12_gdb, raster_dir, ref_projection_raster]:
         if not filepath.exists():
             logger.error(f"Required file not found: {filepath}")
             logger.error(f"  Absolute path: {filepath.absolute()}")
@@ -733,8 +788,8 @@ def main():
         dam_shapefile=dam_shapefile,
         huc12_gdb_path=huc12_gdb,
         ref_projection_raster_path=ref_projection_raster,
-        output_dir=args.output_dir,
-        raster_dir=args.raster_dir if args.clip_rasters else None,
+        output_dir=output_dir,
+        raster_dir=raster_dir if args.clip_rasters else None,
         clipped_dir=args.clipped_dir,
         buffer_distance=args.buffer
     )
@@ -760,6 +815,7 @@ def main():
                 print(f"Buffer Applied: {calculator.buffer_distance} meters")
             print(f"Number of HUC12s: {len(calculator.downstream_huc12s)}")
             print(f"Total Distance: {calculator.total_distance:.2f} km")
+            print(f"Stopped: {calculator.stop_reason}")
 
             # Add raster clipping results
             if args.clip_rasters:
