@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import setup_taudem_path, run_taudem_command
+from utils import setup_taudem_path, run_taudem_command, default_output_dir
 
 
 # Configure logging
@@ -323,9 +323,15 @@ def main():
         help="Path to TauDEM installation (default: $HOME/taudem)"
     )
     parser.add_argument(
+        "--dam-dir",
+        default=None,
+        help="Per-dam input directory (e.g. data/<dam>); only used to pick the default --output-dir"
+    )
+    parser.add_argument(
         "--output-dir",
-        default="outputs",
-        help="Directory containing HAND workflow outputs; default location of all files below (default: outputs)"
+        default=None,
+        help="Directory containing HAND workflow outputs; default location of all files below "
+             "(default: outputs/<dam-dir name> with --dam-dir, else outputs)"
     )
     parser.add_argument("--hand-raster", help="HAND raster (default: <output-dir>/hand.tif)")
     parser.add_argument("--catch-raster", help="Reach catchment raster (default: <output-dir>/w2.tif)")
@@ -348,6 +354,9 @@ def main():
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.output_dir is None:
+        args.output_dir = default_output_dir(args.dam_dir) if args.dam_dir else "outputs"
 
     DamInundationAnalysis(
         taudem_path=args.taudem_path,

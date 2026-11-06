@@ -36,9 +36,9 @@ The workflow produces HAND rasters, stream networks, and catchment data required
 
 ### generate_segment_outlets.py
 
-Places outlet points at fixed along-stream intervals (default 2 km) on the TauDEM D8 main stem below the dam. It traces `p.tif` from the snapped dam outlet (`outlet.shp`) along the dam's stream grid (`src.tif`). Outlets go on the TauDEM network rather than on hydrofabric/NHD flowlines because HAND, `streamnet` and the catchments are all defined on that grid; vector flowlines from another DEM drift off the D8 path. A short last reach (< `--min-segment-length`, default half the segment length) is merged into the reach above. The trace ends at `--max-distance` meters below the dam if given; otherwise just upstream of where it first enters a large lake or reservoir from `--waterbody-path` (NHDPlus HR `NHDWaterbody`); otherwise at the end of `src.tif`. The stretch below the end gets `DSNODEID = -1` and is left out of `catchlist.csv`. `--confluence-ratio` optionally adds breaks just above major tributary confluences (where contributing area jumps by more than the given fraction). The output has the same schema as the hand-made `Outlets2_utm.shp` (`ID` = 1 for the dam, 0 otherwise), plus `type` and `dist_m` (distance below the dam).
+Places outlet points at fixed along-stream intervals (default 2 km) on the TauDEM D8 main stem below the dam. It traces `p.tif` from the snapped dam outlet (`outlet.shp`) along the dam's stream grid (`src.tif`). Outlets go on the TauDEM network rather than on hydrofabric/NHD flowlines because HAND, `streamnet` and the catchments are all defined on that grid; vector flowlines from another DEM drift off the D8 path. A short last reach (< `--min-segment-length`, default half the segment length) is merged into the reach above. The trace ends at `--max-distance` meters below the dam if given; otherwise just upstream of where it first enters a large lake or reservoir from `--waterbody-path` (NHDPlus HR `NHDWaterbody`; by default the HU4 GDB recorded by `dam_catchments` in `run_info.json`); otherwise at the end of `src.tif`. The stretch below the end gets `DSNODEID = -1` and is left out of `catchlist.csv`. `--confluence-ratio` optionally adds breaks just above major tributary confluences (where contributing area jumps by more than the given fraction). The output has the same schema as the hand-made `Outlets2_utm.shp` (`ID` = 1 for the dam, 0 otherwise), plus `type` and `dist_m` (distance below the dam).
 
-It runs automatically inside `dam_hand` when `--segment-length` is given. It can also run on its own (`uv run dam_outlets --work-dir outputs --to-crs EPSG:26912`) on an existing `dam_hand` output directory, so you can inspect or edit the outlets in GIS and pass them back through `--outlets-on-reaches`.
+It runs automatically inside `dam_hand` when `--segment-length` is given. It can also run on its own (`uv run dam_outlets --work-dir outputs/mountain_dell --to-crs EPSG:26912`) on an existing `dam_hand` output directory, so you can inspect or edit the outlets in GIS and pass them back through `--outlets-on-reaches`.
 
 **Note:** Reach IDs (`LINKNO` in `net2.shp` / `Id` in `catchlist.csv`) change whenever the outlets change, so `forecast.csv` must be keyed to the IDs from the same run.
 
@@ -106,94 +106,97 @@ uv run dam_catchments --help
 
 ### Data Setup
 
-Before running the workflow, verify your `data/` directory contains the required
-source datasets. Note that the `data/` directory is not included in the repository and must be created manually relative to the project root directory. The scripts expect the following structure:
+The `data/` directory is not in the repository; create it next to the project root. Each dam has its own self-contained folder, `data/<dam>/`, passed as `--dam-dir`. It holds the dam's inputs and the NHDPlus HR HU4 dataset for the HU4 that contains the dam.
 
-#### Required Datasets
+#### Dam inputs
 
-- **Dam Location**: A shapefile (`.shp`) containing the point location of the dam.
-- **NHDPlus HUC12 Geodatabase**: The `WBD_National_GDB.gdb` or specific HUC12
-  boundary layers.
-- **NHDPlus Rasters**: Elevation (DEM), Flow Direction (Fdr), and Flow
-  Accumulation (Fac) rasters.
-- **Stage Data**: `stage.txt` with the stage heights (m) used to build the rating curves.
-- **Forecast Data**: `forecast.csv` with per-reach discharge (`Id, flow_m3s`), keyed to the reach IDs of the current `dam_hand` run. You can supply it later through `dam_inundation --forecast-file`; it is not needed to run `dam_hand`.
-- **Outlet Locations**: `Outlets2_utm.shp` defining the watershed outlets
-  (not needed when `dam_hand` is run with `--segment-length`).
+- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile`.
+- **Stage data**: `stage.txt`, the stage heights (m) used to build the rating curves.
+- **Forecast data** (optional): `forecast.csv` with per-reach discharge (`Id, flow_m3s`), keyed to the reach IDs of the current `dam_hand` run. You can supply it later through `dam_inundation --forecast-file`.
+- **Outlet locations** (optional): `Outlets2_utm.shp`, defining the reach outlets. It is not needed when `dam_hand` runs with `--segment-length`.
 
-#### Example Directory Structure
+#### NHDPlus HR dataset for the dam's HU4
+
+Download the NHDPlus HR geodatabase and raster set for the HU4 that contains the dam, and unzip both into the dam folder. `dam_catchments` finds them automatically:
+
+- **HU4 geodatabase**: the single `*.gdb` with a `WBDHU12` layer, directly in the dam folder or one subfolder down, for example `NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb`. It provides the `WBDHU12` layer for the downstream HUC12 walk, and the `NHDWaterbody` layer for the lake/reservoir stop. Other geodatabases, such as `elev_source.gdb` in the raster folder, are ignored.
+- **HU4 raster folder**: the single subfolder containing `hydrodem.tif`, for example `NHDPLUS_H_1602_HU4_20220412_RASTER/` (it also holds `fdr.tif`, `elev_cm.tif`, and so on).
+
+To use NHDPlus data stored elsewhere, pass `--huc12-gdb` and `--raster-dir` to `dam_catchments`. You can also symlink the folders into the dam folder.
+
+#### Example directory structure
 
 ```text
 data/
-├── dam/
-│   └── dam_location.shp
-├── nhdplus/
-│   ├── WBD_National_GDB.gdb
-│   └── HR_Rasters/
-│       ├── elev_cm.tif
-│       ├── fdr.tif
-│       └── fac.tif
-│       └── hydrodem.tif
-├── hydrologic_data/
+├── mountain_dell/
+│   ├── mountain_dell_dam_location.shp
 │   ├── stage.txt
 │   ├── forecast.csv
-│   └── Outlets2_utm.shp
+│   ├── Outlets2_utm.shp
+│   ├── NHDPLUS_H_1602_HU4_20220412_GDB/
+│   │   └── NHDPLUS_H_1602_HU4_20220412_GDB.gdb
+│   └── NHDPLUS_H_1602_HU4_20220412_RASTER/
+│       ├── hydrodem.tif
+│       └── ...
+└── beach_city_dam/
+    ├── beach_city_dam_location.shp
+    ├── stage.txt
+    ├── NHDPLUS_H_0504_HU4_GDB/      # Beach City Dam is in HU4 0504 (Muskingum)
+    └── NHDPLUS_H_0504_HU4_RASTER/
 ```
+
+By default, every stage writes to `outputs/<dam>/`, named after the `--dam-dir` folder, so runs for different dams do not overwrite each other.
 
 ## Detailed Execution Commands
 
-Follow this sequence for a complete analysis. These commands require the data
-directory to be set up as described above.
+Follow this sequence for a complete analysis. The examples use Mountain Dell Dam; for another dam, change `--dam-dir`.
 
 ### 1. Computing HUC12 Bounding Box and Clipping HUC12 Rasters
 
 Calculate downstream HUC12s and prepare clipped datasets to optimize performance.
 
 ```bash
-uv run dam_catchments \
-  --dam-shapefile data/dam/dam_location.shp \
-  --huc12-gdb data/nhdplus/WBD_National_GDB.gdb \
-  --raster-dir data/nhdplus/HR_Rasters \
-  --ref-projection-raster data/nhdplus/HR_Rasters/hydrodem.tif \
-  --buffer 4000 \
-  --output-dir outputs \
-  --clipped-dir clipped \
-  --clip-rasters
+uv run dam_catchments --dam-dir data/mountain_dell
 ```
 
-For detailed commmand options, run `uv run dam_catchments --help`. Running `dam_catchments` with deault arguments:
-
-```bash
-uv run dam_catchments --clip-rasters --buffer 4000
-```
-
-Check the source code for the default values of the arguments.
+For all options, run `uv run dam_catchments --help`.
 
 This command will:
 
 - Calculate the bounding box for all HUC12 watersheds downstream from the dam location
 - Clip all NHDPlus rasters to the calculated bounding box
 - Add a 4000-meter buffer around the bounding box before clipping
-- Save clipped rasters to `outputs/clipped/` directory
+- Save clipped rasters to `outputs/<dam>/clipped/`
 - Generate processing reports and downstream HUC12 shapefiles
+- Record the inputs in `outputs/<dam>/run_info.json`; `dam_hand` and `dam_outlets` read the HU4 GDB path from this file
+
+The downstream walk stops at whichever comes first:
+- `--max-distance` (default 100 km);
+- a closed or terminal basin;
+- the edge of the HU4 GDB.
+
+Only one HU4 is supported. If the river leaves the HU4 before the distance limit, the script logs a prominent warning, and the domain is cut off at the HU4 boundary. The stop reason is printed and recorded in `processing_report.txt`. If the dam is more than 1 km from every HUC12 in the GDB, the script stops with an error, because the GDB is for a different HU4 than the dam.
 
 **Arguments:**
 
-- `--dam-shapefile`: Path to the dam location shapefile.
-- `--huc12-gdb`: Path to the NHDPlus HUC12 geodatabase.
-- `--raster-dir`: Directory containing source rasters.
-- `--ref-projection-raster`: Reference raster for target projection.
-- `--buffer`: Extension distance (meters) around the bounding box.
-- `--output-dir`: Directory for output files.
-- `--clipped-dir`: Subdirectory for clipped rasters (within `outputs/`).
-- `--clip-rasters`: Flag to trigger the clipping process.
+- `--dam-dir` (required): Per-dam input directory.
+- `--dam-shapefile`: Dam location shapefile (default: found in `--dam-dir`).
+- `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam (default: found in `--dam-dir`).
+- `--raster-dir`: NHDPlus HR HU4 raster directory to clip (default: found in `--dam-dir`).
+- `--ref-projection-raster`: Reference raster for the target projection (default: `<raster-dir>/hydrodem.tif`).
+- `--max-distance`: Maximum downstream distance in km (default: 100).
+- `--buffer`: Extension distance (meters) around the bounding box (default: 4000).
+- `--output-dir`: Directory for output files (default: `outputs/<dam>`).
+- `--clipped-dir`: Subdirectory for clipped rasters within `--output-dir` (default: `clipped`).
+- `--no-clip-rasters`: Only compute the bounding box.
 
 **Outputs:**
 
-- `outputs/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
-- `outputs/bounding_box_coordinates.txt`: CRS and coordinate bounds.
-- `outputs/processing_report.txt`: Log of the catchment analysis.
-- `outputs/clipped/`: Directory containing trimmed NHDPlus rasters.
+- `outputs/<dam>/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
+- `outputs/<dam>/bounding_box_coordinates.txt`: CRS and coordinate bounds.
+- `outputs/<dam>/processing_report.txt`: Log of the catchment analysis, including the stop reason.
+- `outputs/<dam>/run_info.json`: Input paths used by later stages.
+- `outputs/<dam>/clipped/`: Directory containing trimmed NHDPlus rasters.
 
 ### 2. HAND Calculation Workflow
 
@@ -202,27 +205,18 @@ Generate the Height Above Nearest Drainage (HAND) raster using TauDEM tools.
 ```bash
 uv run dam_hand \
   --taudem-path /usr/local/bin \
-  --data-dir data/hydrologic_data \
-  --dam-shapefile data/dam/dam_location.shp \
-  --clipped-dir outputs/clipped \
-  --output-dir outputs/hand_results
+  --dam-dir data/mountain_dell
 ```
 
-`--dam-shapefile` defaults to `<data-dir>/mountain_dell_dam_location.shp`. `stage.txt`, `forecast.csv` and the outlets shapefile are read directly from `--data-dir` (no subfolders), which is why the example points it at `data/hydrologic_data`.
+`dam_hand` reads clipped rasters from `outputs/<dam>/clipped` and writes to `outputs/<dam>`. It reads the dam shapefile, `stage.txt`, `forecast.csv` and the outlets shapefile directly from `--dam-dir` (no subfolders).
 
-For detailed commmand options, run `uv run dam_hand --help`. Running `dam_hand` with deault arguments:
+To generate 2 km reach outlets instead of using `Outlets2_utm.shp`:
 
 ```bash
-uv run dam_hand --taudem-path /usr/local/bin
+uv run dam_hand --taudem-path /usr/local/bin --dam-dir data/mountain_dell --segment-length 2000
 ```
 
-Generate 2 km reach outlets instead of using `Outlets2_utm.shp`:
-
-```bash
-uv run dam_hand --taudem-path /usr/local/bin --segment-length 2000
-```
-
-Check the source code for the default values of the arguments.
+For all options, run `uv run dam_hand --help`.
 
 This command will:
 
@@ -236,10 +230,11 @@ This command will:
 **Arguments:**
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
-- `--data-dir`: Directory containing input data files (default: data).
-- `--clipped-dir`: Folder containing clipped rasters from step 1.
-- `--output-dir`: Directory to save HAND results.
-- `--outlets-on-reaches`: Name of outlets shapefile in data directory
+- `--dam-dir` (required): Per-dam input directory.
+- `--dam-shapefile`: Dam location shapefile (default: found in `--dam-dir`).
+- `--output-dir`: Directory to save HAND results (default: `outputs/<dam>`).
+- `--clipped-dir`: Folder containing clipped rasters from step 1 (default: `<output-dir>/clipped`).
+- `--outlets-on-reaches`: Name of outlets shapefile in `--dam-dir`
   (default: Outlets2_utm.shp). Ignored when `--segment-length` is set.
 - `--segment-length`: Generate outlets every N meters along the dam's main
   stem (e.g. 2000) instead of reading `--outlets-on-reaches`.
@@ -250,8 +245,9 @@ This command will:
 - `--waterbody-path`: With `--segment-length`, NHDPlus HR GDB whose
   `NHDWaterbody` layer ends the main stem just upstream of the first lake or
   reservoir (FType 390/436) of at least `--min-waterbody-area` km² (default:
-  the 1602 HU4 GDB under `--data-dir`). Waterbodies within 500 m of the dam (its
-  own reservoir) are ignored. If the default file is missing, or has no
+  the GDB recorded by `dam_catchments` in `run_info.json`, else the GDB in `--dam-dir`). Waterbodies
+  within 500 m of the dam (its own reservoir) are ignored. If no default is
+  available, or the GDB has no
   waterbodies near the main stem, the main stem runs to the end of `src.tif`
   with a warning; a `--waterbody-path` you pass explicitly must exist.
 - `--min-waterbody-area`: Smallest lake/reservoir in km² that ends the main
@@ -261,13 +257,20 @@ This command will:
 - `--min-slope`: Reach slopes below this value are raised to it in
   `catchlist.csv` (default: 1e-5). Flat valley reaches can have zero slope,
   which breaks Manning's equation.
+- `--stream-threshold`: Contributing-area threshold in cells for the TauDEM
+  stream grid (default: 10000, about 1 km² at NHDPlus HR's 10 m cells).
+- `--move-outlet-distance`: Max distance in cells that `moveoutletstostreams`
+  moves the reach outlets (default: 3000).
+- `--manning-n`: Manning's n for every reach in `catchlist.csv` (default: 0.05).
+- `--np`: Number of MPI processes for TauDEM (default: 4). `streamnet` reach IDs
+  (`LINKNO`) depend on it, so keep it fixed when reusing a `forecast.csv`.
 
 **Outputs:**
 
-- `outputs/hand_results/hand.tif`: Height Above Nearest Drainage raster.
-- `outputs/hand_results/w2.tif`: Catchment raster.
-- `outputs/hand_results/catchlist.csv`: List of catchment properties.
-- `outputs/hand_results/slp.tif`: Slope raster.
+- `outputs/<dam>/hand.tif`: Height Above Nearest Drainage raster.
+- `outputs/<dam>/w2.tif`: Catchment raster.
+- `outputs/<dam>/catchlist.csv`: List of catchment properties.
+- `outputs/<dam>/slp.tif`: Slope raster.
 - Various intermediate files generated by TauDEM tools.
 
 ### 3. Hydraulic Properties (Synthetic Rating Curve)
@@ -277,11 +280,10 @@ Build the per-reach hydraulic properties table from the HAND outputs. Run this o
 ```bash
 uv run dam_hydroprop \
   --taudem-path /usr/local/bin \
-  --output-dir outputs \
-  --stage-file data/hydrologic_data/stage.txt
+  --dam-dir data/mountain_dell
 ```
 
-Every file flag defaults to a path inside `--output-dir`. Run `uv run dam_hydroprop --help` to see them all.
+`--dam-dir` only picks the default `--output-dir` (`outputs/<dam>`). Every file flag defaults to a path inside `--output-dir`. Run `uv run dam_hydroprop --help` to see them all.
 
 This command will:
 
@@ -292,7 +294,8 @@ This command will:
 **Arguments:**
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
-- `--output-dir`: Directory with the `dam_hand` outputs. It is also the default location of every file below.
+- `--dam-dir`: Per-dam input directory; sets the default `--output-dir` to `outputs/<dam>`.
+- `--output-dir`: Directory with the `dam_hand` outputs (default: `outputs/<dam>` with `--dam-dir`, else `outputs`). It is also the default location of every file below.
 - `--hand-raster`, `--catch-raster`, `--catchlist`, `--slope-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`, `catchlist.csv`, `slp.tif`).
 - `--stage-file`: Stage heights in metres, one per line (default `stage.txt`). For dam-break floods, extend the stages high enough that the top stage's discharge exceeds the expected peak flow.
 - `--hydroprop-file`: Output table (default `hydroprop.csv`).
@@ -300,7 +303,7 @@ This command will:
 
 **Outputs:**
 
-- `outputs/hydroprop.csv`: Hydraulic properties table (synthetic rating curves).
+- `outputs/<dam>/hydroprop.csv`: Hydraulic properties table (synthetic rating curves).
 
 ### 4. Inundation Mapping
 
@@ -309,10 +312,10 @@ Generate inundation depths for a flow scenario. You can run this step many times
 ```bash
 uv run dam_inundation \
   --taudem-path /usr/local/bin \
-  --output-dir outputs \
-  --forecast-file data/hydrologic_data/forecast.csv \
-  --inundation-raster outputs/inundepth_peak.tif \
-  --depth-table outputs/depths_peak.csv
+  --dam-dir data/mountain_dell \
+  --forecast-file data/mountain_dell/forecast.csv \
+  --inundation-raster outputs/mountain_dell/inundepth_peak.tif \
+  --depth-table outputs/mountain_dell/depths_peak.csv
 ```
 
 This command will:
@@ -346,8 +349,8 @@ Whitespace after commas is allowed, and extra columns are ignored. A script that
 
 **Outputs:**
 
-- `outputs/inundepth.tif`: Flood inundation depth raster.
-- `outputs/depths.csv`: Per-reach summary of flow, stage depth, inundated area, and inundation ratio.
+- `outputs/<dam>/inundepth.tif`: Flood inundation depth raster.
+- `outputs/<dam>/depths.csv`: Per-reach summary of flow, stage depth, inundated area, and inundation ratio.
 
 ## Development Setup
 

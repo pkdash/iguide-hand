@@ -37,6 +37,8 @@ import numpy as np
 import rasterio
 from shapely.geometry import Point
 
+from utils import read_run_info
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -61,9 +63,12 @@ D8_OFFSETS = {
 STOP_WATERBODY_FTYPES = (390, 436)
 # Waterbodies within this distance of the dam are treated as the dam's own reservoir
 DAM_RESERVOIR_BUFFER_M = 500.0
-# Same NHDPlus HR GDB that dam_catchments reads by default, relative to the data directory
-DEFAULT_WATERBODY_GDB = "NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb"
-DEFAULT_WATERBODY_PATH = f"data/{DEFAULT_WATERBODY_GDB}"
+
+
+def default_waterbody_path(work_dir):
+    """The NHDPlus HR GDB dam_catchments used (from run_info.json in work_dir), or None."""
+    gdb = read_run_info(work_dir).get("huc12_gdb")
+    return Path(gdb) if gdb else None
 
 
 class SegmentOutletGenerator:
@@ -317,6 +322,9 @@ class SegmentOutletGenerator:
                 logger.info(f"Stopping where the main stem enters {name}: "
                             f"{path[-1][2] / 1000:.2f} km below the dam "
                             f"({(total - path[-1][2]) / 1000:.2f} km left out)")
+        else:
+            logger.warning("No waterbody file (--waterbody-path or run_info.json); "
+                           "tracing to the end of src.tif")
 
         breaks = self.select_breaks(path, ad8)
 
@@ -377,13 +385,13 @@ def main():
                              "(default: off)")
     parser.add_argument("--waterbody-path", default=None,
                         help="NHDPlus HR GDB with an NHDWaterbody layer; the trace stops just upstream "
-                             f"of the first large lake/reservoir (default: {DEFAULT_WATERBODY_PATH}, "
-                             "skipped with a warning if missing; an explicit path must exist; "
-                             "ignored with --max-distance)")
+                             "of the first large lake/reservoir (default: the --huc12-gdb recorded by "
+                             "dam_catchments in <work-dir>/run_info.json, skipped with a warning if "
+                             "missing; an explicit path must exist; ignored with --max-distance)")
     parser.add_argument("--min-waterbody-area", type=float, default=10.0,
                         help="Smallest lake/reservoir (km2) that ends the trace (default: 10)")
     parser.add_argument("--to-crs", default=None,
-                        help="Also write a reprojected copy, e.g. EPSG:26912")
+                        help="Also write a reprojected copy, e.g. EPSG:26912 (NAD83 / UTM 12N)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -397,7 +405,7 @@ def main():
             min_segment_length=args.min_segment_length,
             confluence_ratio=args.confluence_ratio,
             max_distance=args.max_distance,
-            waterbody_path=args.waterbody_path or DEFAULT_WATERBODY_PATH,
+            waterbody_path=args.waterbody_path or default_waterbody_path(args.work_dir),
             min_waterbody_area_km2=args.min_waterbody_area,
             waterbody_required=args.waterbody_path is not None,
         )

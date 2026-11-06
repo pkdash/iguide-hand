@@ -18,9 +18,9 @@ import pandas as pd
 from pathlib import Path
 import rasterio
 from rasterio.features import rasterize
-from utils import setup_taudem_path, run_taudem_command
-from generate_segment_outlets import DEFAULT_WATERBODY_GDB, SegmentOutletGenerator
-
+from utils import (setup_taudem_path, run_taudem_command, find_dam_shapefile,
+                   find_nhdplus_gdb, default_output_dir, read_run_info)
+from generate_segment_outlets import SegmentOutletGenerator, default_waterbody_path
 
 # Configure logging
 logging.basicConfig(
@@ -33,21 +33,23 @@ logger = logging.getLogger(__name__)
 class HandDamWorkflow:
     """Main class for HAND dam workflow processing."""
 
-    def __init__(self, taudem_path="$HOME/taudem", output_dir="outputs",
-                 data_dir="data", clipped_dir="outputs/clipped",
-                 outlets_on_reaches="Outlets2_utm.shp", segment_length=None,
+    def __init__(self, dam_dir, taudem_path="$HOME/taudem", output_dir=None,
+                 clipped_dir=None, outlets_on_reaches="Outlets2_utm.shp", segment_length=None,
                  min_segment_length=None, confluence_ratio=None, min_slope=1e-5,
                  max_distance=None, waterbody_path=None,
-                 min_waterbody_area_km2=10.0):
+                 min_waterbody_area_km2=10.0, dam_shapefile=None,
+                 stream_threshold=10000, move_outlet_distance=3000, num_processes=4, manning_n=0.05):
         """
         Initialize the workflow.
 
         Args:
+            dam_dir: Per-dam input directory (dam location shapefile, stage.txt, and
+                optionally forecast.csv and the outlets shapefile)
             taudem_path: Path to TauDEM installation
-            output_dir: Output directory for results
-            data_dir: Input data directory
-            clipped_dir: Directory containing clipped rasters
-            outlets_on_reaches: Name of user-supplied outlets shapefile in data directory
+            output_dir: Output directory for results (default: outputs/<dam_dir name>)
+            clipped_dir: Directory containing clipped rasters (default: <output_dir>/clipped,
+                where dam_catchments writes them)
+            outlets_on_reaches: Name of user-supplied outlets shapefile in dam_dir
                 (ignored when segment_length is set)
             segment_length: If set, generate outlets every this many meters along the dam's
                 main stem instead of using outlets_on_reaches
@@ -59,31 +61,63 @@ class HandDamWorkflow:
                 (overrides the waterbody stop)
             waterbody_path: With segment_length, NHDPlus HR GDB whose NHDWaterbody layer ends the
                 main stem just upstream of the first large lake/reservoir. Default (None):
-                the 1602 HU4 GDB under data_dir, skipped with a warning if missing. An
-                explicit path must exist.
+                the huc12_gdb dam_catchments recorded in <output_dir>/run_info.json, else the
+                NHDPlus HR GDB in dam_dir; with neither, there is no waterbody stop. An explicit
+                path must exist.
             min_waterbody_area_km2: Smallest lake/reservoir (km2) that ends the main stem
+            dam_shapefile: Dam location shapefile. Default (None): dam_location.shp, or the
+                single *dam_location.shp, in dam_dir
+            stream_threshold: Contributing-area threshold (cells) for the stream grid
+            move_outlet_distance: Max cells moveoutletstostreams moves the reach outlets
+            num_processes: Number of MPI processes for TauDEM. streamnet's LINKNO numbering
+                depends on it, so keep it fixed for forecasts keyed to reach IDs
+            manning_n: Manning's n written for every reach in catchlist.csv
         """
         self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
-        self.output_dir = Path(output_dir).resolve()
-        self.data_dir = Path(data_dir).resolve()
-        self.clipped_dir = Path(clipped_dir).resolve()
+        self.dam_dir = Path(dam_dir).expanduser().resolve()
+        if not self.dam_dir.is_dir():
+            raise FileNotFoundError(f"Dam directory not found: {self.dam_dir}")
+        self.output_dir = (default_output_dir(self.dam_dir) if output_dir is None
+                           else Path(output_dir).expanduser().resolve())
+        self.clipped_dir = (self.output_dir / "clipped" if clipped_dir is None
+                            else Path(clipped_dir).expanduser().resolve())
         self.outlets_on_reaches = outlets_on_reaches
+        self.dam_shapefile = (find_dam_shapefile(self.dam_dir) if dam_shapefile is None
+                              else Path(dam_shapefile).expanduser().resolve())
+        self.stream_threshold = stream_threshold
+        self.move_outlet_distance = move_outlet_distance
+        self.num_processes = num_processes
+        self.manning_n = manning_n
         self.segment_length = segment_length
         self.min_segment_length = min_segment_length
         self.confluence_ratio = confluence_ratio
         self.min_slope = min_slope
         self.max_distance = max_distance
         self.waterbody_required = waterbody_path is not None
-        self.waterbody_path = (self.data_dir / DEFAULT_WATERBODY_GDB if waterbody_path is None
-                               else Path(waterbody_path).resolve())
+        if waterbody_path is not None:
+            self.waterbody_path = Path(waterbody_path).expanduser().resolve()
+        else:
+            self.waterbody_path = default_waterbody_path(self.output_dir)
+            if self.waterbody_path is None:
+                try:
+                    self.waterbody_path = find_nhdplus_gdb(self.dam_dir)
+                except FileNotFoundError:
+                    pass  # no waterbody stop; SegmentOutletGenerator warns
         self.min_waterbody_area_km2 = min_waterbody_area_km2
         # Fail before the TauDEM steps rather than at outlet generation
         if (self.waterbody_required and segment_length is not None and max_distance is None
                 and not self.waterbody_path.exists()):
             raise FileNotFoundError(f"Waterbody file not found: {self.waterbody_path}")
 
+        logger.info(f"Dam directory: {self.dam_dir}")
+        logger.info(f"Dam shapefile: {self.dam_shapefile}")
+        logger.info(f"Output directory: {self.output_dir}")
+        if not read_run_info(self.output_dir):
+            logger.warning(f"No run_info.json in {self.output_dir}; was dam_catchments run "
+                           "with this output directory?")
+
         # Ensure output directory exists
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Set up TauDEM PATH
         setup_taudem_path(str(self.taudem_path))
@@ -117,7 +151,7 @@ class HandDamWorkflow:
         logger.info("Copying input files...")
 
         # stage.txt is required (input to dam_hydroprop)
-        src_file = self.data_dir / "stage.txt"
+        src_file = self.dam_dir / "stage.txt"
         if not src_file.exists():
             logger.error(f"Required input file not found: {src_file}")
             sys.exit(1)
@@ -126,13 +160,13 @@ class HandDamWorkflow:
 
         # forecast.csv is optional here: it is keyed to this run's reach IDs, so it
         # is usually generated after dam_hand and passed to dam_inundation directly
-        src_file = self.data_dir / "forecast.csv"
+        src_file = self.dam_dir / "forecast.csv"
         if src_file.exists():
             shutil.copy2(src_file, self.output_dir / "forecast.csv")
             logger.info("Copied forecast.csv")
         else:
             logger.info(
-                f"No forecast.csv in {self.data_dir}; supply one to dam_inundation via --forecast-file"
+                f"No forecast.csv in {self.dam_dir}; supply one to dam_inundation via --forecast-file"
             )
 
     def create_flow_direction_mask(self):
@@ -221,7 +255,7 @@ class HandDamWorkflow:
         """Project dam location shapefile to match raster coordinate system."""
         logger.info("Projecting dam location to raster coordinate system...")
 
-        dam_shp = self.data_dir / "mountain_dell_dam_location.shp"
+        dam_shp = self.dam_shapefile
         fel_raster = self.output_dir / "fel.tif"
         output_shp = self.output_dir / "proj_damloc.shp"
 
@@ -241,11 +275,11 @@ class HandDamWorkflow:
         logger.info(f"Created projected dam location: {output_shp}")
 
     def copy_outlets_on_reaches(self):
-        """Copy user-supplied Outlets2_utm.shp from data directory to outputs directory."""
+        """Copy user-supplied Outlets2_utm.shp from dam directory to outputs directory."""
         logger.info(f"Copying user-supplied outlets file: {self.outlets_on_reaches}")
 
-        # Source file in data directory
-        source_shp = self.data_dir / self.outlets_on_reaches
+        # Source file in dam directory
+        source_shp = self.dam_dir / self.outlets_on_reaches
 
         # Check if source file exists
         if not source_shp.exists():
@@ -306,7 +340,7 @@ class HandDamWorkflow:
         # Flow direction conditioning
         self.run_taudem_command(
             (
-                "mpiexec -n 4 flowdircond "
+                f"mpiexec -n {self.num_processes} flowdircond "
                 "-z elev_cm.tif "
                 "-p pfdc.tif "
                 "-zfdc elevfdc.tif"
@@ -321,7 +355,7 @@ class HandDamWorkflow:
         # Pit removal
         self.run_taudem_command(
             (
-                "mpiexec -n 8 pitremove "
+                f"mpiexec -n {self.num_processes} pitremove "
                 "-z elevNHDm.tif "
                 "-fel fel.tif"
             ),
@@ -331,7 +365,7 @@ class HandDamWorkflow:
         # D8 flow direction
         self.run_taudem_command(
             (
-                "mpiexec -n 8 d8flowdir "
+                f"mpiexec -n {self.num_processes} d8flowdir "
                 "-fel fel.tif "
                 "-p p.tif "
                 "-sd8 sd8.tif"
@@ -342,7 +376,7 @@ class HandDamWorkflow:
         # D-infinity flow direction
         self.run_taudem_command(
             (
-                "mpiexec -n 8 dinfflowdir "
+                f"mpiexec -n {self.num_processes} dinfflowdir "
                 "-fel fel.tif "
                 "-ang ang.tif "
                 "-slp slp.tif"
@@ -353,7 +387,7 @@ class HandDamWorkflow:
         # Contributing area
         self.run_taudem_command(
             (
-                "mpiexec -n 8 aread8 "
+                f"mpiexec -n {self.num_processes} aread8 "
                 "-p p.tif "
                 "-ad8 ad8.tif "
                 "-nc"
@@ -368,10 +402,10 @@ class HandDamWorkflow:
         # Threshold for stream network
         self.run_taudem_command(
             (
-                "mpiexec -n 8 threshold "
+                f"mpiexec -n {self.num_processes} threshold "
                 "-ssa ad8.tif "
                 "-src srctemp.tif "
-                "-thresh 10000"
+                f"-thresh {self.stream_threshold:g}"
             ),
             "Stream network threshold"
         )
@@ -379,7 +413,7 @@ class HandDamWorkflow:
         # Move outlets to streams
         self.run_taudem_command(
             (
-                "mpiexec -n 4 moveoutletstostreams "
+                f"mpiexec -n {self.num_processes} moveoutletstostreams "
                 "-p p.tif "
                 "-src srctemp.tif "
                 "-o proj_damloc.shp "
@@ -395,7 +429,7 @@ class HandDamWorkflow:
         # Contributing area with weight grid (for HAND calculation)
         self.run_taudem_command( 
             (
-                "mpiexec -n 8 aread8 "
+                f"mpiexec -n {self.num_processes} aread8 "
                 "-p p.tif "
                 "-ad8 src.tif "
                 "-wg damloc.tif "
@@ -407,7 +441,7 @@ class HandDamWorkflow:
         # HAND calculation
         self.run_taudem_command(
             (
-                "mpiexec -n 8 dinfdistdown "
+                f"mpiexec -n {self.num_processes} dinfdistdown "
                 "-ang ang.tif "
                 "-fel fel.tif "
                 "-src src.tif "
@@ -462,12 +496,12 @@ class HandDamWorkflow:
         # Move outlets to streams with maximum distance
         self.run_taudem_command(
             (
-                "mpiexec -n 4 moveoutletstostreams "
+                f"mpiexec -n {self.num_processes} moveoutletstostreams "
                 "-p p.tif "
                 "-src src.tif "
                 "-o Outlets2_geo.shp "
                 "-om Outlets2_align.shp "
-                "-md 3000"
+                f"-md {self.move_outlet_distance}"
             ),
             "Move additional outlets to streams"
         )
@@ -475,7 +509,7 @@ class HandDamWorkflow:
         # Stream network analysis
         self.run_taudem_command(
             (
-                "mpiexec -n 4 streamnet "
+                f"mpiexec -n {self.num_processes} streamnet "
                 "-fel fel.tif "
                 "-p p.tif "
                 "-ad8 ad8.tif "
@@ -518,7 +552,7 @@ class HandDamWorkflow:
                 'Id': row['LINKNO'],
                 'Slope': slope,
                 'Length': row['Length'],
-                'Manning_n': 0.05
+                'Manning_n': self.manning_n
             })
 
         # Save to CSV
@@ -587,27 +621,35 @@ def main():
     )
 
     parser.add_argument(
-        "--output-dir",
-        default="outputs",
-        help="Output directory for results (default: outputs)"
+        "--dam-dir",
+        required=True,
+        help="Per-dam input directory, e.g. data/<dam>, holding the dam location shapefile, "
+             "stage.txt, and optionally forecast.csv and the outlets shapefile"
     )
 
     parser.add_argument(
-        "--data-dir",
-        default="data",
-        help="Input data directory (default: data)"
+        "--output-dir",
+        default=None,
+        help="Output directory for results (default: outputs/<dam-dir name>)"
+    )
+
+    parser.add_argument(
+        "--dam-shapefile",
+        default=None,
+        help="Dam location shapefile (default: dam_location.shp, or the single "
+             "*dam_location.shp, in --dam-dir)"
     )
 
     parser.add_argument(
         "--clipped-dir",
-        default="outputs/clipped",
-        help="Directory containing clipped rasters (default: outputs/clipped)"
+        default=None,
+        help="Directory containing clipped rasters (default: <output-dir>/clipped)"
     )
 
     parser.add_argument(
         "--outlets-on-reaches",
         default="Outlets2_utm.shp",
-        help="Name of user-supplied outlets shapefile in data directory (default: Outlets2_utm.shp). "
+        help="Name of user-supplied outlets shapefile in --dam-dir (default: Outlets2_utm.shp). "
              "Ignored when --segment-length is set"
     )
 
@@ -646,9 +688,10 @@ def main():
         "--waterbody-path",
         default=None,
         help="With --segment-length, NHDPlus HR GDB whose NHDWaterbody layer ends the main stem "
-             f"just upstream of the first large lake/reservoir (default: <data-dir>/{DEFAULT_WATERBODY_GDB}, "
-             "skipped with a warning if missing; an explicit path must exist; "
-             "ignored with --max-distance)"
+             "just upstream of the first large lake/reservoir (default: the --huc12-gdb that "
+             "dam_catchments recorded in <output-dir>/run_info.json, else the GDB in --dam-dir; "
+             "skipped with a warning if "
+             "unavailable; an explicit path must exist; ignored with --max-distance)"
     )
 
     parser.add_argument(
@@ -666,6 +709,31 @@ def main():
     )
 
     parser.add_argument(
+        "--stream-threshold",
+        type=float,
+        default=10000,
+        help="Contributing-area threshold in cells for the TauDEM stream grid (default: 10000)"
+    )
+
+    parser.add_argument(
+        "--move-outlet-distance",
+        type=int,
+        default=3000,
+        help="Max distance in cells that moveoutletstostreams moves reach outlets (default: 3000)"
+    )
+
+    parser.add_argument(
+        "--manning-n",
+        type=float,
+        default=0.05,
+        help="Manning's n written for every reach in catchlist.csv (default: 0.05)"
+    )
+
+    parser.add_argument("--np", type=int, default=4,
+                        help="Number of MPI processes (default: 4). Reach IDs (LINKNO) from streamnet "
+                             "depend on it, so keep it fixed when reusing a forecast.csv")
+
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging"
@@ -678,20 +746,29 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Create and run workflow
-    workflow = HandDamWorkflow(
-        taudem_path=args.taudem_path,
-        output_dir=args.output_dir,
-        data_dir=args.data_dir,
-        clipped_dir=args.clipped_dir,
-        outlets_on_reaches=args.outlets_on_reaches,
-        segment_length=args.segment_length,
-        min_segment_length=args.min_segment_length,
-        confluence_ratio=args.confluence_ratio,
-        min_slope=args.min_slope,
-        max_distance=args.max_distance,
-        waterbody_path=args.waterbody_path,
-        min_waterbody_area_km2=args.min_waterbody_area,
-    )
+    try:
+        workflow = HandDamWorkflow(
+            dam_dir=args.dam_dir,
+            taudem_path=args.taudem_path,
+            output_dir=args.output_dir,
+            clipped_dir=args.clipped_dir,
+            outlets_on_reaches=args.outlets_on_reaches,
+            segment_length=args.segment_length,
+            min_segment_length=args.min_segment_length,
+            confluence_ratio=args.confluence_ratio,
+            min_slope=args.min_slope,
+            max_distance=args.max_distance,
+            waterbody_path=args.waterbody_path,
+            min_waterbody_area_km2=args.min_waterbody_area,
+            dam_shapefile=args.dam_shapefile,
+            stream_threshold=args.stream_threshold,
+            move_outlet_distance=args.move_outlet_distance,
+            num_processes=args.np,
+            manning_n=args.manning_n,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(str(e))
+        sys.exit(1)
 
     workflow.run_workflow()
 
