@@ -104,6 +104,8 @@ uv sync
 uv run dam_catchments --help
 ```
 
+All three options install only the command-line pipeline (`geopandas`, `rasterio` and their dependencies). The Jupyter packages used by the notebook (`ipykernel`, `matplotlib`) are an optional dependency group. They are not installed unless you ask for them with `uv sync --group notebook` (see [Running in JupyterHub](#running-in-jupyterhub)).
+
 ### Data Setup
 
 The `data/` directory is not in the repository; create it next to the project root. Each dam has its own self-contained folder, `data/<dam>/`, passed as `--dam-dir`. It holds the dam's inputs and the NHDPlus HR HU4 dataset for the HU4 that contains the dam.
