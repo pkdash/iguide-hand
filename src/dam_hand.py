@@ -20,7 +20,8 @@ import rasterio
 from rasterio.features import rasterize
 from utils import (resolve_user_path, setup_taudem_path, run_taudem_command, find_dam_shapefile,
                    find_nhdplus_gdb, default_output_dir, read_run_info)
-from generate_segment_outlets import SegmentOutletGenerator, default_waterbody_path
+from generate_segment_outlets import (SegmentOutletGenerator, default_waterbody_path,
+                                      STOP_WATERBODY_FTYPES)
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +39,8 @@ class HandDamWorkflow:
                  min_segment_length=None, confluence_ratio=None, min_slope=1e-5,
                  max_distance=None, waterbody_path=None,
                  min_waterbody_area_km2=10.0, dam_shapefile=None,
-                 stream_threshold=10000, move_outlet_distance=3000, num_processes=4, manning_n=0.05):
+                 stream_threshold=10000, move_outlet_distance=3000, dam_move_distance=200,
+                 num_processes=4, manning_n=0.05):
         """
         Initialize the workflow.
 
@@ -56,7 +58,8 @@ class HandDamWorkflow:
             min_segment_length: Shortest generated reach in meters (default: 0.5 * segment_length)
             confluence_ratio: If set, also break generated reaches above confluences where
                 contributing area grows by more than this fraction
-            min_slope: Reach slopes below this value are raised to it in catchlist.csv
+            min_slope: Reaches flatter than this get the slope of the surrounding main stem
+                (see reach_slopes); clamped to it only if the whole main stem is flatter
             max_distance: With segment_length, end the main stem this many meters below the dam
                 (overrides the waterbody stop)
             waterbody_path: With segment_length, NHDPlus HR GDB whose NHDWaterbody layer ends the
@@ -69,6 +72,8 @@ class HandDamWorkflow:
                 single *dam_location.shp, in dam_dir
             stream_threshold: Contributing-area threshold (cells) for the stream grid
             move_outlet_distance: Max cells moveoutletstostreams moves the reach outlets
+            dam_move_distance: Max cells moveoutletstostreams moves the dam point down its
+                flow path to the stream grid; if no stream is reached, a warning is logged
             num_processes: Number of MPI processes for TauDEM. streamnet's LINKNO numbering
                 depends on it, so keep it fixed for forecasts keyed to reach IDs
             manning_n: Manning's n written for every reach in catchlist.csv
@@ -86,6 +91,8 @@ class HandDamWorkflow:
                               else resolve_user_path(dam_shapefile, self.dam_dir))
         self.stream_threshold = stream_threshold
         self.move_outlet_distance = move_outlet_distance
+        self.dam_move_distance = dam_move_distance
+        self.dam_snap = None  # set by check_dam_outlet()
         self.num_processes = num_processes
         self.manning_n = manning_n
         self.segment_length = segment_length
@@ -414,17 +421,124 @@ class HandDamWorkflow:
             "Stream network threshold"
         )
 
-        # Move outlets to streams
+        # Move the dam point down its flow path to the first stream cell. Without -md,
+        # TauDEM gives up after 50 cells and silently leaves the point off-stream.
         self.run_taudem_command(
             (
                 f"mpiexec -n {self.num_processes} moveoutletstostreams "
                 "-p p.tif "
                 "-src srctemp.tif "
                 "-o proj_damloc.shp "
-                "-om outlet.shp"
+                "-om outlet.shp "
+                f"-md {self.dam_move_distance}"
             ),
-            "Move outlets to streams"
+            "Move dam location to stream"
         )
+        self.check_dam_outlet()
+
+    def check_dam_outlet(self):
+        """
+        Report where the dam point was snapped. Warn if it is not on the stream grid, or if
+        the dam point or snapped outlet lies inside an NHD lake/reservoir.
+
+        An off-stream dam point (e.g. an NID coordinate on the embankment) makes the main stem
+        start on a hillslope path. A point in the reservoir sits on a flat DEM surface, where
+        the stream TauDEM routes across the flat may leave by the wrong side (Quail Creek
+        Dam: out past the South Dam instead of down Quail Creek). Either way the first reaches'
+        length, slope, rating curve and the HAND around them are not those of the river.
+
+        Returns:
+            dict with moved_m, contributing_area_km2, on_stream and in_waterbody (None, or a
+            description) (also kept in self.dam_snap)
+        """
+        dam = gpd.read_file(self.output_dir / "proj_damloc.shp").geometry.iloc[0]
+        outlet = gpd.read_file(self.output_dir / "outlet.shp").geometry.iloc[0]
+        with rasterio.open(self.output_dir / "srctemp.tif") as src:
+            row, col = src.index(outlet.x, outlet.y)
+            on_stream = bool(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0] == 1)
+            cell_area_km2 = abs(src.res[0] * src.res[1]) / 1e6
+        with rasterio.open(self.output_dir / "ad8.tif") as src:
+            cells = float(src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0])
+        self.dam_snap = {
+            "moved_m": round(dam.distance(outlet), 1),
+            "contributing_area_km2": float(f"{cells * cell_area_km2:.3g}"),
+            "on_stream": on_stream,
+        }
+        if on_stream:
+            logger.info(
+                f"Dam point moved {self.dam_snap['moved_m']:g} m to the stream grid "
+                f"(contributing area {self.dam_snap['contributing_area_km2']:.3g} km2 ({cells:.0f} cells))"
+            )
+        else:
+            logger.warning("=" * 70)
+            logger.warning(
+                f"Dam point is NOT on the stream grid: no stream cell within "
+                f"{self.dam_move_distance} cells down its flow path (contributing area at the "
+                f"point: {self.dam_snap['contributing_area_km2']:.3g} km2 = {cells:.0f} cells, stream threshold "
+                f"{self.stream_threshold * cell_area_km2:.3g} km2 = {self.stream_threshold:g} cells). The main stem will start on a "
+                "hillslope path, so results near the dam are unreliable. Move the dam point onto "
+                "the channel below the dam, or raise --dam-move-distance."
+            )
+            logger.warning("=" * 70)
+
+        # A point inside a lake/reservoir sits on the DEM's flat water surface. TauDEM's
+        # flow directions across that flat are made up, so a "stream" through it, and the
+        # side of the reservoir it leaves by, need not be the dam's outflow channel.
+        self.dam_snap["in_waterbody"] = None
+        waterbodies = self.find_waterbodies_containing({"dam point": dam, "snapped dam outlet": outlet})
+        if waterbodies:
+            self.dam_snap["in_waterbody"] = "; ".join(f"{k} in {v}" for k, v in waterbodies.items())
+        if "snapped dam outlet" in waterbodies:
+            logger.warning("=" * 70)
+            logger.warning(
+                f"Snapped dam outlet is inside {waterbodies['snapped dam outlet']}. The DEM is "
+                "flat there, so the main stem follows a made-up route across the reservoir and may "
+                "leave it by the wrong side instead of through the dam. Move the dam point onto "
+                "the channel just below the dam embankment."
+            )
+            logger.warning("=" * 70)
+        elif "dam point" in waterbodies:
+            # The snap followed the flat to its lowest exit, which for an on-stream reservoir
+            # is the dam; worth a look on a map when the reservoir has several exits
+            logger.info(
+                f"Dam point is inside {waterbodies['dam point']}; the snapped outlet, "
+                f"{self.dam_snap['moved_m']:g} m away, is outside it. Check that the outlet is "
+                "just below the dam, not on another side of the reservoir."
+            )
+        return self.dam_snap
+
+    def find_waterbodies_containing(self, points):
+        """
+        Return {label: waterbody name} for the points (in the raster CRS) that fall inside an
+        NHD lake/reservoir in self.waterbody_path. Returns {} if no GDB is available.
+        """
+        if self.waterbody_path is None or not Path(self.waterbody_path).exists():
+            logger.info("No NHDPlus GDB available; skipping the dam-in-reservoir check")
+            return {}
+        with rasterio.open(self.output_dir / "fel.tif") as src:
+            crs = src.crs
+        pts = gpd.GeoSeries(list(points.values()), index=list(points.keys()), crs=crs)
+        try:
+            layer_crs = gpd.read_file(self.waterbody_path, layer="NHDWaterbody", rows=1).crs
+            # Small search box around the points (degrees or meters, per the layer CRS)
+            pad = 1e-3 if layer_crs.is_geographic else 100
+            minx, miny, maxx, maxy = pts.to_crs(layer_crs).total_bounds
+            bbox = (minx - pad, miny - pad, maxx + pad, maxy + pad)
+            wb = gpd.read_file(self.waterbody_path, layer="NHDWaterbody", bbox=bbox)
+        except Exception as e:  # missing layer, unreadable GDB: the check is advisory
+            logger.info(f"Skipping the dam-in-reservoir check: {e}")
+            return {}
+        wb.columns = [c.lower() if c != wb.geometry.name else c for c in wb.columns]
+        if "ftype" in wb.columns:
+            wb = wb[wb["ftype"].isin(STOP_WATERBODY_FTYPES)]
+        wb = wb.to_crs(crs)
+        found = {}
+        for label, pt in pts.items():
+            hit = wb[wb.contains(pt)]
+            if not hit.empty:
+                name = hit.iloc[0].get("gnis_name")
+                found[label] = name if isinstance(name, str) and name.strip() else "an unnamed waterbody"
+        return found
 
     def run_taudem_phase4(self):
         """Run TauDEM Phase 4: HAND calculation."""
@@ -529,6 +643,64 @@ class HandDamWorkflow:
         )
 
 
+    def reach_slopes(self, reaches):
+        """
+        Return {LINKNO: slope} for the study reaches, fixing reaches that are flat in the DEM.
+
+        streamnet's Slope is a reach's end-to-end drop on the pit-filled DEM (fel.tif) over
+        its length. Pit filling leaves flat stretches, so a reach that falls inside one can
+        get a drop of ~0 even where the river is clearly sloping (Quail Creek Dam: 0 m over
+        2 km between reaches sloping 2-3e-3). With Manning's equation, such a slope needs an
+        unrealistically large depth to carry the flow.
+
+        A reach whose slope is below min_slope therefore gets the slope of a longer stretch
+        of the main stem: the reach plus k reaches upstream and k downstream (total drop over
+        total length), starting at k = 1 and growing until the slope reaches min_slope. If
+        even the whole main stem is flatter than that, the slope is clamped to min_slope.
+
+        Args:
+            reaches: GeoDataFrame of study reaches from net2.shp (LINKNO, DSLINKNO,
+                strmDrop, Length, Slope)
+        """
+        r = reaches.set_index("LINKNO")
+        slopes = r["Slope"].astype(float).to_dict()
+        if self.min_slope is None:
+            return slopes
+
+        # Neighbours along the main stem (upstream: the link draining into this one; if
+        # there are several, the one with the largest contributing area)
+        downstream = {l: d for l, d in r["DSLINKNO"].items() if d in r.index}
+        upstream = {}
+        for l, d in downstream.items():
+            if d not in upstream or r.loc[l, "DSContArea"] > r.loc[upstream[d], "DSContArea"]:
+                upstream[d] = l
+
+        for link, slope in list(slopes.items()):
+            if slope >= self.min_slope:
+                continue
+            window, new_slope = [link], slope
+            up, down = upstream.get(link), downstream.get(link)
+            while new_slope < self.min_slope and (up is not None or down is not None):
+                window += [l for l in (up, down) if l is not None]
+                up = upstream.get(up) if up is not None else None
+                down = downstream.get(down) if down is not None else None
+                new_slope = r.loc[window, "strmDrop"].sum() / r.loc[window, "Length"].sum()
+            if new_slope >= self.min_slope:
+                logger.warning(
+                    f"Reach {link}: slope {slope:.2e} is below --min-slope {self.min_slope:.0e} "
+                    f"(flat in the pit-filled DEM); using {new_slope:.2e}, the slope over "
+                    f"{r.loc[window, 'Length'].sum() / 1000:.1f} km of main stem around it "
+                    f"({len(window)} reaches)"
+                )
+                slopes[link] = new_slope
+            else:
+                logger.warning(
+                    f"Reach {link}: slope {slope:.2e} is below --min-slope and the whole main "
+                    f"stem is flatter ({new_slope:.2e}); set to {self.min_slope:.2e}"
+                )
+                slopes[link] = self.min_slope
+        return slopes
+
     def create_catchment_list(self):
         """Create catchment list CSV from stream network shapefile."""
         logger.info("Creating catchment list...")
@@ -541,20 +713,14 @@ class HandDamWorkflow:
 
         # Filter rows where DSNODEID == 0 (internal nodes)
         filtered_gdf = net_gdf[net_gdf['DSNODEID'] == 0]
+        slopes = self.reach_slopes(filtered_gdf)
 
         # Create catchment list dataframe
         catchlist_data = []
         for _, row in filtered_gdf.iterrows():
-            slope = row['Slope']
-            if self.min_slope is not None and slope < self.min_slope:
-                logger.warning(
-                    f"Reach {row['LINKNO']}: slope {slope:.2e} below minimum; "
-                    f"set to {self.min_slope:.2e}"
-                )
-                slope = self.min_slope
             catchlist_data.append({
                 'Id': row['LINKNO'],
-                'Slope': slope,
+                'Slope': slopes[row['LINKNO']],
                 'Length': row['Length'],
                 'Manning_n': self.manning_n
             })
@@ -710,7 +876,8 @@ def main():
         "--min-slope",
         type=float,
         default=1e-5,
-        help="Reach slopes below this are raised to it in catchlist.csv (default: 1e-5)"
+        help="Reaches flatter than this get the slope over the main stem around them; "
+             "clamped to it only if the whole main stem is flatter (default: 1e-5)"
     )
 
     parser.add_argument(
@@ -725,6 +892,14 @@ def main():
         type=int,
         default=3000,
         help="Max distance in cells that moveoutletstostreams moves reach outlets (default: 3000)"
+    )
+
+    parser.add_argument(
+        "--dam-move-distance",
+        type=int,
+        default=200,
+        help="Max distance in cells that the dam point is moved down its flow path to the stream "
+             "grid; a warning is logged if no stream is reached (default: 200)"
     )
 
     parser.add_argument(
@@ -768,6 +943,7 @@ def main():
             dam_shapefile=args.dam_shapefile,
             stream_threshold=args.stream_threshold,
             move_outlet_distance=args.move_outlet_distance,
+            dam_move_distance=args.dam_move_distance,
             num_processes=args.np,
             manning_n=args.manning_n,
         )
