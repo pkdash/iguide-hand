@@ -147,6 +147,25 @@ data/
 
 By default, every stage writes to `outputs/<dam>/`, named after the `--dam-dir` folder, so runs for different dams do not overwrite each other.
 
+## Running in JupyterHub
+
+`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_NAME`, `DAM_LAT`, `DAM_LON`) and run all cells. The notebook uses `src/dam_setup.py` to:
+
+- find the HU4 that contains the dam;
+- download that HU4's NHDPlus HR GDB and raster zips from the USGS National Map bucket (the raster zip is 1–6 GB);
+- write the dam point shapefile and a default `stage.txt` into `data/<dam>/`.
+
+Existing files are kept. Set `NHD_CACHE_DIR` to a shared folder (e.g. `data/`) so dams in the same HU4 download the data only once.
+
+TauDEM (>= 5.4.0) and MPI must already be installed; set `TAUDEM_PATH` in the notebook. One-time setup from the repo root:
+
+```bash
+uv sync --group notebook
+uv run python -m ipykernel install --user --name iguide-hand --display-name "Python (iguide-hand)"
+```
+
+Then open the notebook in JupyterHub and select the **Python (iguide-hand)** kernel.
+
 ## Detailed Execution Commands
 
 Follow this sequence for a complete analysis. The examples use Mountain Dell Dam; for another dam, change `--dam-dir`.

@@ -9,6 +9,12 @@ dependencies = [
     "rasterio==1.4.3",
 ]
 
+[dependency-groups]
+notebook = [
+    "ipykernel",
+    "matplotlib",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
