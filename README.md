@@ -104,9 +104,29 @@ uv sync
 uv run dam_catchments --help
 ```
 
+All three options install only the command-line pipeline (`geopandas`, `rasterio` and their dependencies). The Jupyter packages used by the notebook (`ipykernel`, `matplotlib`) are an optional dependency group. They are not installed unless you ask for them with `uv sync --group notebook` (see [Running in JupyterHub](#running-in-jupyterhub)).
+
 ### Data Setup
 
 The `data/` directory is not in the repository; create it next to the project root. Each dam has its own self-contained folder, `data/<dam>/`, passed as `--dam-dir`. It holds the dam's inputs and the NHDPlus HR HU4 dataset for the HU4 that contains the dam.
+
+#### Quick start: from the dam's coordinates
+
+If you have only the dam's latitude and longitude, let `dam_catchments` build the dam folder:
+
+```bash
+uv run dam_catchments --dam-dir data/my_dam --dam-lat 40.750594 --dam-lon -111.721088 --nhd-cache-dir data
+```
+
+It creates `data/my_dam/` if needed and adds whatever is missing:
+
+- `my_dam_dam_location.shp`, the dam point (EPSG:4326). Name the file with `--dam-name`; `--dam-label "My Dam"` sets the readable name stored in its `Dam_Name` field.
+- `stage.txt` with default stage heights from 0.1 to 40 m. Edit it to change them.
+- The NHDPlus HR GDB and raster folder for the HU4 that contains the dam. The HU4 is looked up from the USGS WBD map service; pass `--hu4` to skip the lookup. The zips are downloaded from the USGS National Map bucket and extracted into `--nhd-cache-dir`, then linked into the dam folder. Use one cache folder, such as `data/`, so dams in the same HU4 download the data only once. The raster zip is 1–6 GB, so allow about 3× that in free disk space. `--keep-zips` keeps the zips.
+
+Existing files are kept, so you can rerun the same command; once the NHDPlus data is in the dam folder, a rerun needs no network access. If a dam shapefile already in the folder is more than 10 m from `--dam-lat`/`--dam-lon`, `dam_catchments` stops with an error instead of using the old point; delete that shapefile to use the new coordinates. With `--huc12-gdb` or `--raster-dir`, only the other product is downloaded. Put the point on the channel just below the dam embankment: NID coordinates often fall in the reservoir, where the DEM is flat (see `--dam-move-distance` below).
+
+The other stages need no extra flags; they read the dam folder and `run_info.json` as usual.
 
 #### Dam inputs
 
@@ -146,6 +166,25 @@ data/
 ```
 
 By default, every stage writes to `outputs/<dam>/`, named after the `--dam-dir` folder, so runs for different dams do not overwrite each other.
+
+## Running in JupyterHub
+
+`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_LABEL`, `DAM_LAT`, `DAM_LON`) and run all cells. `DAM_LABEL` is the dam's name, such as `"Mountain Dell Dam"`. It goes into the dam shapefile and the plot titles, and the folder name for `data/<dam>/` and `outputs/<dam>/` is derived from it (`mountain_dell`: lowercase, `_` for spaces and punctuation, a trailing "dam" dropped). Set `DAM_NAME` to choose the folder name yourself. The notebook uses `src/dam_setup.py` to:
+
+- find the HU4 that contains the dam;
+- download that HU4's NHDPlus HR GDB and raster zips from the USGS National Map bucket (the raster zip is 1–6 GB);
+- write the dam point shapefile and a default `stage.txt` into `data/<dam>/`.
+
+Existing files are kept. Set `NHD_CACHE_DIR` to a shared folder (e.g. `data/`) so dams in the same HU4 download the data only once.
+
+TauDEM (>= 5.4.0) and MPI must already be installed; set `TAUDEM_PATH` in the notebook. One-time setup from the repo root:
+
+```bash
+uv sync --group notebook
+uv run python -m ipykernel install --user --name iguide-hand --display-name "Python (iguide-hand)"
+```
+
+Then open the notebook in JupyterHub and select the **Python (iguide-hand)** kernel.
 
 ## Detailed Execution Commands
 
@@ -190,12 +229,23 @@ Only one HU4 is supported. If the river leaves the HU4 before the distance limit
 - `--clipped-dir`: Subdirectory for clipped rasters within `--output-dir` (default: `clipped`).
 - `--no-clip-rasters`: Only compute the bounding box.
 
+Dam setup from coordinates (see [Quick start](#quick-start-from-the-dams-coordinates)):
+
+- `--dam-lat`, `--dam-lon`: Dam location, WGS84 decimal degrees. Given together; they cannot be combined with `--dam-shapefile`.
+- `--dam-name`: Name for `<dam-name>_dam_location.shp` (default: the `--dam-dir` folder name).
+- `--dam-label`: Readable dam name for the shapefile's `Dam_Name` field, e.g. `"Mountain Dell Dam"` (default: the `--dam-name` value).
+- `--hu4`: 4-digit HUC containing the dam (default: looked up from the coordinates).
+- `--nhd-cache-dir`: Folder to extract the NHDPlus HR downloads into; relative to the current directory (default: `--dam-dir`).
+- `--keep-zips`: Keep the downloaded zip files.
+
+`--dam-name`, `--dam-label`, `--hu4`, `--nhd-cache-dir` and `--keep-zips` need `--dam-lat`/`--dam-lon`.
+
 **Outputs:**
 
 - `outputs/<dam>/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
 - `outputs/<dam>/bounding_box_coordinates.txt`: CRS and coordinate bounds.
 - `outputs/<dam>/processing_report.txt`: Log of the catchment analysis, including the stop reason.
-- `outputs/<dam>/run_info.json`: Input paths used by later stages.
+- `outputs/<dam>/run_info.json`: Input paths used by later stages, plus `hu4` when it was looked up for `--dam-lat`/`--dam-lon`.
 - `outputs/<dam>/clipped/`: Directory containing trimmed NHDPlus rasters.
 
 ### 2. HAND Calculation Workflow
@@ -234,6 +284,7 @@ This command will:
 - `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `--dam-dir` (default: found in `--dam-dir`).
 - `--output-dir`: Directory to save HAND results (default: `outputs/<dam>`).
 - `--clipped-dir`: Folder containing clipped rasters from step 1 (default: `<output-dir>/clipped`).
+- `--dam-move-distance`: How far, in cells, the dam point may move down its flow path to reach the stream grid (default: 200). If it does not reach a stream, for example because the dam coordinate lies in the reservoir or on the embankment, a prominent warning is logged: the main stem would then start on a hillslope path. Fix the dam point or raise this value. A warning is also logged if the snapped point lies inside an NHDPlus lake or reservoir. The DEM is flat there, so the route TauDEM takes across the reservoir may leave by the wrong side instead of through the dam. Put the dam point on the channel just below the embankment; NID coordinates often fall in the reservoir.
 - `--outlets-on-reaches`: Name of outlets shapefile in `--dam-dir`
   (default: Outlets2_utm.shp). Ignored when `--segment-length` is set.
 - `--segment-length`: Generate outlets every N meters along the dam's main
@@ -254,9 +305,8 @@ This command will:
   stem (default: 10).
 - `--max-distance`: With `--segment-length`, end the main stem this many
   meters below the dam instead. Overrides the waterbody stop.
-- `--min-slope`: Reach slopes below this value are raised to it in
-  `catchlist.csv` (default: 1e-5). Flat valley reaches can have zero slope,
-  which breaks Manning's equation.
+- `--min-slope`: Smallest believable reach slope (default: 1e-5). See
+  [Flat reaches](#flat-reaches) below.
 - `--stream-threshold`: Contributing-area threshold in cells for the TauDEM
   stream grid (default: 10000, about 1 km² at NHDPlus HR's 10 m cells).
 - `--move-outlet-distance`: Max distance in cells that `moveoutletstostreams`
@@ -272,6 +322,21 @@ This command will:
 - `outputs/<dam>/catchlist.csv`: List of catchment properties.
 - `outputs/<dam>/slp.tif`: Slope raster.
 - Various intermediate files generated by TauDEM tools.
+
+#### Flat reaches
+
+A reach's slope in `catchlist.csv` drives its rating curve through Manning's equation. TauDEM `streamnet` computes it as the reach's end-to-end drop on the pit-filled DEM (`fel.tif`) divided by its length. Pit filling leaves flat stretches, so a reach that falls inside one can get a drop of zero even where the river clearly slopes. With a near-zero slope, Manning's equation needs an unrealistically large depth to carry the flow. Short reaches (`--segment-length`) are the most exposed, and because the reach boundaries move with the outlets, a rerun can move the problem to a different reach.
+
+When a reach's slope is below `--min-slope`, `dam_hand` uses the slope of a longer stretch of the main stem instead. It starts with the reach plus one reach upstream and one downstream: the total drop divided by the total length. If that is still below `--min-slope`, it adds one more reach on each side, and so on. Only if the whole main stem is flatter than `--min-slope` is the slope set to `--min-slope`. A warning names each reach adjusted and the slope it now has. Reaches at or above `--min-slope` keep their own slope.
+
+Examples with 2 km reaches at 4000 m³/s:
+
+| Dam | Reach | Own slope | Slope used | Water level before / after |
+|---|---|---|---|---|
+| Quail Creek | 26 | 0 (zero drop over 2 km) | 2.2e-3 over 6 km | 35.4 m / 8.8 m (neighbours 11.0 m and 8.8 m) |
+| Mountain Dell | 4 | 5e-6 | 1.5e-4 over 6 km | 8.7 m / 4.1 m (neighbours 8.5 m and 5.2 m) |
+
+"Before" is the old behaviour, which clamped the slope to `--min-slope`. No other reach changed.
 
 ### 3. Hydraulic Properties (Synthetic Rating Curve)
 
@@ -307,7 +372,7 @@ This command will:
 
 ### 4. Inundation Mapping
 
-Generate inundation depths for a flow scenario. You can run this step many times against one `hydroprop.csv`, once per forecast.
+Generate inundation depths for a flow scenario. You can run this step many times against one `hydroprop.csv`, once per forecast. Give the flows with exactly one of `--forecast-file` or `--uniform-flow`.
 
 ```bash
 uv run dam_inundation \
@@ -317,6 +382,14 @@ uv run dam_inundation \
   --inundation-raster outputs/mountain_dell/inundepth_peak.tif \
   --depth-table outputs/mountain_dell/depths_peak.csv
 ```
+
+Without a forecast, map the same flow on every reach:
+
+```bash
+uv run dam_inundation --taudem-path /usr/local/bin --dam-dir data/mountain_dell --uniform-flow 4000
+```
+
+This writes `outputs/<dam>/forecast_uniform4000.csv` from `catchlist.csv` and maps it.
 
 This command will:
 
@@ -342,7 +415,8 @@ Whitespace after commas is allowed, and extra columns are ignored. A script that
 
 - `--taudem-path`, `--output-dir`, `--np`: As for `dam_hydroprop`.
 - `--hand-raster`, `--catch-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`).
-- `--forecast-file`: Forecast flows. A bare filename is looked up in `--dam-dir`; any other path is relative to the current directory (default `forecast.csv` in the output dir).
+- `--forecast-file`: Forecast flows. A bare filename is looked up in `--dam-dir`; any other path is relative to the current directory. There is no default: to use the `forecast.csv` in the dam folder, pass `--forecast-file forecast.csv` with `--dam-dir`.
+- `--uniform-flow`: Instead of `--forecast-file`, one flow (m³/s, > 0) for every reach in `--catchlist`. Writes `<output-dir>/forecast_uniform<flow>.csv`.
 - `--hydroprop-file`: Table from `dam_hydroprop` (default `hydroprop.csv`).
 - `--catchlist`: Reach list used for the ID check (default `catchlist.csv`).
 - `--inundation-raster`, `--depth-table`: Outputs (defaults `inundepth.tif`, `depths.csv`).
@@ -420,7 +494,15 @@ If you want to contribute to the iGuide HAND workflow or modify the code, follow
    uv run src/dam_inundation.py --help
    ```
 
-3. **Add tests** (if applicable) and ensure existing functionality works
+3. **Run the tests** and add tests for new behavior:
+
+   ```bash
+   uv sync --group dev          # add --group notebook to keep the notebook packages
+   uv run pytest                # offline suite (tests/)
+   uv run pytest -m network     # live checks against the USGS WBD service and TNM bucket
+   ```
+
+   The offline suite builds small NHDPlus HR stand-ins and serves them as `file://` URLs, so it needs no network or TauDEM.
 
 4. **Commit and push your changes**:
 
@@ -449,10 +531,13 @@ iguide-hand/
 │   ├── generate_segment_outlets.py # Fixed-interval reach outlets on the D8 main stem
 │   ├── dam_hydroprop.py # Hydraulic properties (synthetic rating curves)
 │   ├── dam_inundation.py # Inundation depth mapping for a forecast
+│   ├── dam_setup.py     # Dam folder setup from lat/lon: HU4 lookup, NHDPlus HR download, dam point, stage.txt
 │   └── utils.py         # Utility functions
+├── notebooks/
+│   └── dam_inundation_pipeline.ipynb # Full pipeline from a dam's lat/lon (see Running in JupyterHub)
 ├── data/                # Input data files (not in repo)
 ├── outputs/             # Generated output files (not in repo)
-├── tests/               # Unit tests (future)
+├── tests/               # pytest suite (uv run pytest)
 ├── pyproject.toml       # Project configuration and dependencies
 ├── README.md           # This file
 └── .gitignore          # Git ignore rules

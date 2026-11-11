@@ -1,10 +1,10 @@
 # HAND pipeline demo (Mountain Dell Dam)
 
-Run all commands from the repo root, in one shell session, because later steps use the variables set in step 0. The same steps work for any dam: change `DAM` and `OUT` in step 0.
+Run all commands from the repo root, in one shell session, because later steps use the variables set in step 0. The same steps work for any dam: change `DAM` and `OUT` in step 0, and the coordinates in step 1 if you use them.
 
 ## 0. Set up the dam folder
 
-Each dam has a self-contained folder: the dam's inputs, plus the NHDPlus HR dataset for the HU4 that contains the dam.
+Each dam has a self-contained folder: the dam's inputs, plus the NHDPlus HR dataset for the HU4 that contains the dam. You can build it yourself, or let `dam_catchments` build it from the dam's coordinates in step 1 (Option A there): then skip to "Then set" below.
 
 ```text
 data/mountain_dell/
@@ -39,6 +39,21 @@ Every stage writes to `$OUT` by default, so the commands below don't pass `--out
 
 Finds the HUC12s downstream of the dam and clips the HU4 rasters into `$OUT/clipped`. It also writes `$OUT/run_info.json`, which records the GDB and raster paths it used.
 
+**Option A: from the dam's coordinates.** `dam_catchments` creates `$DAM` if needed and adds whatever is missing:
+- `mountain_dell_dam_location.shp`, the dam point;
+- `stage.txt`, with default stage heights from 0.1 to 40 m;
+- the NHDPlus HR GDB and raster folder for the dam's HU4.
+
+It looks up the HU4 (1602 here) and downloads the data into `data/`, then links it into `$DAM`. The raster zip is 1–6 GB, so allow about 3× that in free disk space. Existing files are kept: if the data is already in `$DAM` or `data/`, nothing is downloaded, and a rerun needs no network access.
+
+```bash
+uv run dam_catchments --dam-dir $DAM --dam-lat 40.750594 --dam-lon -111.721088 --nhd-cache-dir data
+```
+
+Put the point on the channel just below the dam embankment: NID coordinates often fall in the reservoir. If `$DAM` already has a dam shapefile more than 10 m from these coordinates, the command stops with an error; delete that shapefile to use the new point.
+
+**Option B: from the folder built in step 0.**
+
 ```bash
 uv run dam_catchments --dam-dir $DAM
 ```
@@ -49,7 +64,7 @@ The log lists the `HUC12 GDB` and `Reference raster` it found. The console summa
 - the edge of the HU4, which also logs a warning.
 
 Stop and check your data if:
-- **the GDB or raster folder isn't found, or several are:** the dam folder is missing its NHDPlus data or has more than one set;
+- **the GDB or raster folder isn't found, or several are:** the dam folder is missing its NHDPlus data (use Option A to download it) or has more than one set;
 - **the dam is more than 1 km from every HUC12 in the GDB:** the NHDPlus data is for the wrong HU4.
 
 Takes about 10 seconds for Mountain Dell.
@@ -85,30 +100,27 @@ Writes `$OUT/hydroprop.csv`.
 uv run dam_hydroprop --dam-dir $DAM --taudem-path $TAUDEM
 ```
 
-## 4. Forecast
+## 4. Inundation
 
-Reach IDs change with the outlets, so a `forecast.csv` from `$DAM` won't match a 2 km run. If you have your own forecast whose `Id` values match this run's `$OUT/catchlist.csv`, skip this step and pass it to step 5 with `--forecast-file`. Otherwise, this command builds a uniform 4,000 m³/s forecast from this run's own reaches:
+Writes `$OUT/inundepth.tif` and `$OUT/depths.csv`. Give the flows with exactly one of `--uniform-flow` or `--forecast-file`; the command stops with a usage error if neither is given.
 
-```bash
-uv run python -c "
-import pandas as pd
-c = pd.read_csv('$OUT/catchlist.csv', skipinitialspace=True)
-pd.DataFrame({'Id': c['Id'], 'flow_m3s': 4000}).to_csv('$OUT/forecast_uniform4000.csv', index=False)
-"
-```
-
-## 5. Inundation
-
-Writes `$OUT/inundepth.tif` and `$OUT/depths.csv`.
+Reach IDs change with the outlets, so a `forecast.csv` from `$DAM` won't match a 2 km run. Without a forecast that matches this run, map the same flow on every reach:
 
 ```bash
-uv run dam_inundation --dam-dir $DAM --taudem-path $TAUDEM \
-    --forecast-file $OUT/forecast_uniform4000.csv
+uv run dam_inundation --dam-dir $DAM --taudem-path $TAUDEM --uniform-flow 4000
 ```
 
-To use your own forecast, replace the `--forecast-file` path with your file.
+This first writes `$OUT/forecast_uniform4000.csv` from this run's `$OUT/catchlist.csv`.
 
-To show another flood scenario, change `4000` in step 4 and rerun only steps 4 and 5. `hydroprop.csv` is reused.
+If you have your own forecast whose `Id` values match this run's `$OUT/catchlist.csv`, pass it instead:
+
+```bash
+uv run dam_inundation --dam-dir $DAM --taudem-path $TAUDEM --forecast-file my_forecast.csv
+```
+
+A bare file name is looked up in `$DAM`; any other path is relative to the current directory.
+
+To show another flood scenario, change `4000` and rerun only this step. `hydroprop.csv` is reused. Add `--inundation-raster $OUT/inundepth_8000.tif --depth-table $OUT/depths_8000.csv` to keep each scenario's outputs instead of overwriting them.
 
 ## What to show
 
@@ -120,6 +132,7 @@ To show another flood scenario, change `4000` in step 4 and rerun only steps 4 a
 | `$OUT/hand.tif` | Height Above Nearest Drainage |
 | `$OUT/catchlist.csv` | Reaches: ID, slope, length, Manning's n |
 | `$OUT/hydroprop.csv` | Rating curve for each reach (stage, area, volume, discharge) |
+| `$OUT/forecast_uniform4000.csv` | Flow scenario: 4,000 m³/s on every reach |
 | `$OUT/inundepth.tif` | Flood depth map |
 | `$OUT/depths.csv` | Water level for each reach. `InunRatio = 1` means the catchment, not the channel, caps the water level, so that depth isn't reliable. |
 

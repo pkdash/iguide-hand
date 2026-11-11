@@ -9,8 +9,30 @@ dependencies = [
     "rasterio==1.4.3",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[dependency-groups]
+notebook = [
+    "ipykernel",
+    "matplotlib",
+]
+dev = [
+    "pytest",
+]
+
+# The pipeline scripts are top-level modules in src/ (they import each other
+# as `from utils import ...`), so list them explicitly; packages.find would
+# miss them in a non-editable install.
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "utils",
+    "dam_catchments",
+    "dam_hand",
+    "dam_hydroprop",
+    "dam_inundation",
+    "generate_segment_outlets",
+    "dam_setup",
+]
+packages = []
 
 [project.scripts]
 dam_catchments = "dam_catchments:main"
@@ -21,3 +43,8 @@ dam_outlets = "generate_segment_outlets:main"
 
 [tool.uv]
 package = true
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["network: needs internet access to USGS services (run with -m network)"]
+addopts = "-m 'not network'"
