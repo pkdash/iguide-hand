@@ -21,6 +21,7 @@ generate forecasts can import ``load_forecast``, ``validate_forecast_ids`` and
 ``validate_rating_curve_range`` from this module to check their output.
 """
 
+import math
 import os
 import sys
 import shlex
@@ -56,6 +57,27 @@ def _read_csv(path):
     df = pd.read_csv(path, skipinitialspace=True)
     df.columns = df.columns.str.strip()
     return df
+
+
+def flow_tag(flow_m3s):
+    """File-name tag for a flow: 4000 -> "4000", 2.5 -> "2.5"; distinct flows give distinct tags."""
+    return f"{flow_m3s:.15g}"
+
+
+def write_uniform_forecast(output_dir, flow_m3s, name=None, catchlist=None):
+    """
+    Write <output_dir>/<name> with the same flow on every reach in the catchlist
+    (default: <output_dir>/catchlist.csv). Default name: forecast_uniform<flow>.csv.
+    Returns the path.
+    """
+    output_dir = Path(output_dir).expanduser().resolve()
+    catchlist_path = (output_dir / "catchlist.csv" if catchlist is None
+                      else Path(catchlist).expanduser().resolve())
+    reaches = pd.read_csv(catchlist_path, skipinitialspace=True)
+    path = output_dir / (name or f"forecast_uniform{flow_tag(flow_m3s)}.csv")
+    pd.DataFrame({FORECAST_ID_COL: reaches["Id"], FORECAST_FLOW_COL: flow_m3s}).to_csv(path, index=False)
+    logger.info(f"Wrote uniform {flow_m3s:g} m3/s forecast for {len(reaches)} reaches: {path}")
+    return path
 
 
 def load_forecast(path):
@@ -332,7 +354,8 @@ def main():
     parser.add_argument(
         "--dam-dir",
         default=None,
-        help="Per-dam input directory (e.g. data/<dam>); only used to pick the default --output-dir"
+        help="Per-dam input directory (e.g. data/<dam>); picks the default --output-dir and is where "
+             "a bare --forecast-file name is looked up"
     )
     parser.add_argument(
         "--output-dir",
@@ -342,11 +365,20 @@ def main():
     )
     parser.add_argument("--hand-raster", help="HAND raster (default: <output-dir>/hand.tif)")
     parser.add_argument("--catch-raster", help="Reach catchment raster (default: <output-dir>/w2.tif)")
-    parser.add_argument(
+    # The flows to map: exactly one of these is required
+    forecast = parser.add_mutually_exclusive_group(required=True)
+    forecast.add_argument(
         "--forecast-file",
-        help=f"Forecast CSV with columns '{FORECAST_ID_COL}, {FORECAST_FLOW_COL}'; a bare filename is "
-             "looked up in --dam-dir, other paths are relative to the current directory "
-             "(default: <output-dir>/forecast.csv)"
+        help=f"Forecast CSV with columns '{FORECAST_ID_COL}, {FORECAST_FLOW_COL}' keyed to this run's "
+             "reaches; with --dam-dir a bare filename is looked up there, other paths are relative "
+             "to the current directory"
+    )
+    forecast.add_argument(
+        "--uniform-flow",
+        type=float,
+        metavar="FLOW_M3S",
+        help="Use the same flow (m3/s) on every reach in the catchlist: writes "
+             "<output-dir>/forecast_uniform<FLOW_M3S>.csv and maps it"
     )
     parser.add_argument("--hydroprop-file", help="Hydraulic properties table (default: <output-dir>/hydroprop.csv)")
     parser.add_argument("--catchlist", help="Reach list CSV for reach-ID checks (default: <output-dir>/catchlist.csv)")
@@ -360,6 +392,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.uniform_flow is not None and not (math.isfinite(args.uniform_flow) and args.uniform_flow > 0):
+        parser.error(f"--uniform-flow must be a finite number > 0, got {args.uniform_flow:g}")
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -367,12 +401,21 @@ def main():
     if args.output_dir is None:
         args.output_dir = default_output_dir(args.dam_dir) if args.dam_dir else "outputs"
 
+    forecast_file = args.forecast_file
+    if args.uniform_flow is not None:
+        try:
+            forecast_file = write_uniform_forecast(args.output_dir, args.uniform_flow,
+                                                   catchlist=args.catchlist)
+        except (OSError, KeyError, ValueError) as e:
+            logger.error(f"Could not write the uniform-flow forecast: {e}")
+            sys.exit(1)
+
     DamInundationAnalysis(
         taudem_path=args.taudem_path,
         output_dir=args.output_dir,
         hand_raster=args.hand_raster,
         catch_raster=args.catch_raster,
-        forecast_file=args.forecast_file,
+        forecast_file=forecast_file,
         hydroprop_file=args.hydroprop_file,
         catchlist=args.catchlist,
         inundation_raster=args.inundation_raster,

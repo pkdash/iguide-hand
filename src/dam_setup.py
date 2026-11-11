@@ -7,26 +7,26 @@ a dam's latitude/longitude:
 - ``find_hu4_for_point``: the HU4 that contains the dam (USGS WBD map service)
 - ``nhdplus_hr_urls`` / ``download_nhdplus_hr``: the NHDPlus HR HU4 GDB and raster
   zips from the USGS National Map staged products bucket
+- ``dam_slug``: folder/file name from a dam label (``"Mountain Dell Dam"`` -> ``mountain_dell``)
 - ``write_dam_point``: ``<name>_dam_location.shp``
 - ``write_stage_file``: ``stage.txt``
 
-and, after ``dam_hand``:
-
-- ``write_uniform_forecast``: a uniform-flow ``forecast.csv`` keyed to the run's reaches
-
-Used by ``notebooks/dam_inundation_pipeline.ipynb``; not a console script.
+Used by ``notebooks/dam_inundation_pipeline.ipynb`` and by ``dam_catchments --dam-lat/--dam-lon``;
+not a console script itself. The uniform-flow forecast helper, ``write_uniform_forecast``, is in
+``dam_inundation``.
 """
 
 import json
 import logging
 import re
 import shutil
+import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from utils import DAM_SHAPEFILE_NAME, find_nhdplus_gdb, find_nhdplus_raster_dir
+from utils import DAM_SHAPEFILE_NAME, find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,9 @@ def _download(url, dest, size=None):
             if total and done / total >= next_report:
                 print(f"  {dest.name}: {done / total:4.0%} of {total / 1e9:.2f} GB", flush=True)
                 next_report += 0.05
+    if total and done != total:
+        tmp.unlink()
+        raise OSError(f"Download of {url} stopped at {done} of {total} bytes; rerun to retry")
     tmp.rename(dest)
     return dest
 
@@ -138,7 +141,7 @@ def _extract(zip_path, target_dir):
     partial.rename(target_dir)
 
 
-def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False):
+def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False, products=("gdb", "raster")):
     """
     Make the HU4's NHDPlus HR GDB and raster folder available in dam_dir.
 
@@ -152,16 +155,23 @@ def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False):
         dam_dir: per-dam input directory
         cache_dir: where to keep extracted NHDPlus data (default: dam_dir)
         keep_zips: keep the downloaded zip files after extraction
+        products: which of "gdb" and "raster" to provide (e.g. only "raster" when the
+            GDB is supplied from elsewhere)
 
     Returns:
-        (gdb_path, raster_dir) as found by the utils.py finders
+        (gdb_path, raster_dir) as found by the utils.py finders; None for a product
+        not in products
     """
     dam_dir = Path(dam_dir).expanduser().resolve()
     dam_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = dam_dir if cache_dir is None else Path(cache_dir).expanduser().resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    finders = {"gdb": find_nhdplus_gdb, "raster": find_nhdplus_raster_dir}
+    all_finders = {"gdb": find_nhdplus_gdb, "raster": find_nhdplus_raster_dir}
+    unknown = set(products) - set(all_finders)
+    if unknown:
+        raise ValueError(f"Unknown NHDPlus HR product(s) {sorted(unknown)}; use 'gdb' and/or 'raster'")
+    finders = {k: f for k, f in all_finders.items() if k in products}
     missing = []
     for key, finder in finders.items():
         try:
@@ -184,20 +194,40 @@ def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False):
                 zip_path = cache_dir / zip_name
                 if not zip_path.exists():
                     _download(url, zip_path, size)
-                _extract(zip_path, extracted)
+                try:
+                    _extract(zip_path, extracted)
+                except zipfile.BadZipFile:
+                    zip_path.unlink()  # corrupt: download again next time
+                    raise
                 if not keep_zips:
                     zip_path.unlink()
             link = dam_dir / extracted.name
             if extracted != link and not link.exists():
                 link.symlink_to(extracted, target_is_directory=True)
                 logger.info(f"Linked {link} -> {extracted}")
-    return find_nhdplus_gdb(dam_dir), find_nhdplus_raster_dir(dam_dir)
+    return tuple(finders[k](dam_dir) if k in finders else None for k in ("gdb", "raster"))
 
 
-def write_dam_point(dam_dir, lat, lon, name, tolerance_m=10.0):
+def dam_slug(label):
+    """
+    Folder/file name for a dam label: ASCII, lowercase, runs of other characters -> "_",
+    and a trailing "dam" word dropped ("Mountain Dell Dam" -> "mountain_dell").
+    Raises ValueError if nothing usable is left.
+    """
+    ascii_label = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "_", ascii_label.lower()).strip("_")
+    slug = re.sub(r"_dam$", "", slug)
+    if not slug:
+        raise ValueError(f"Cannot make a folder name from dam label {label!r}; "
+                         "use letters or digits, or set the name explicitly")
+    return slug
+
+
+def write_dam_point(dam_dir, lat, lon, name, tolerance_m=10.0, label=None):
     """
     Write <dam_dir>/<name>_dam_location.shp (EPSG:4326) unless the folder already has a
-    dam shapefile. Returns the dam shapefile path.
+    dam shapefile. Its Dam_Name attribute is label (default: name). Returns the dam
+    shapefile path.
 
     An existing shapefile is never overwritten (it may be the user's own data). If its point
     is more than tolerance_m from (lat, lon), a ValueError is raised, so changed coordinates
@@ -208,23 +238,27 @@ def write_dam_point(dam_dir, lat, lon, name, tolerance_m=10.0):
 
     dam_dir = Path(dam_dir).expanduser().resolve()
     dam_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(dam_dir.glob(f"*{DAM_SHAPEFILE_NAME}"))
-    if existing:
-        current = gpd.read_file(existing[0]).to_crs(4326).geometry.iloc[0]
+    if any(dam_dir.glob(f"*{DAM_SHAPEFILE_NAME}")):
+        # The same file the pipeline will use (raises if ambiguous)
+        existing = find_dam_shapefile(dam_dir)
+        points = gpd.read_file(existing).to_crs(4326).geometry
+        if points.empty:
+            raise ValueError(f"{existing} has no dam point; delete it to write a new one")
+        current = points.iloc[0]
         # Distance in meters, in the point's UTM zone
         pts = gpd.GeoSeries([current, Point(lon, lat)], crs=4326)
         offset = pts.to_crs(pts.estimate_utm_crs())
         offset_m = offset.iloc[0].distance(offset.iloc[1])
         if offset_m > tolerance_m:
             raise ValueError(
-                f"{existing[0]} holds a dam point at lat {current.y:.6f}, lon {current.x:.6f}, "
+                f"{existing} holds a dam point at lat {current.y:.6f}, lon {current.x:.6f}, "
                 f"{offset_m:.0f} m from the requested lat {lat}, lon {lon}. Delete that shapefile "
                 "to use the new coordinates, or change the coordinates to match it."
             )
-        logger.info(f"Using existing dam shapefile: {existing[0]}")
-        return existing[0]
+        logger.info(f"Using existing dam shapefile: {existing}")
+        return existing
     path = dam_dir / f"{name}_{DAM_SHAPEFILE_NAME}"
-    gpd.GeoDataFrame({"ID": [1], "Dam_Name": [name]},
+    gpd.GeoDataFrame({"ID": [1], "Dam_Name": [label or name]},
                      geometry=[Point(lon, lat)], crs="EPSG:4326").to_file(path)
     logger.info(f"Wrote dam shapefile: {path}")
     return path
@@ -239,21 +273,4 @@ def write_stage_file(dam_dir, stages=None, overwrite=False):
     stages = DEFAULT_STAGES if stages is None else stages
     path.write_text("Stage\n" + "\n".join(f"{s:g}" for s in stages) + "\n")
     logger.info(f"Wrote {len(stages)} stage heights to {path}")
-    return path
-
-
-def write_uniform_forecast(output_dir, flow_m3s, name=None):
-    """
-    Write a forecast with the same flow on every reach in <output_dir>/catchlist.csv.
-    Default file name: forecast_uniform<flow>.csv. Returns the path.
-    """
-    import pandas as pd
-
-    from dam_inundation import FORECAST_FLOW_COL, FORECAST_ID_COL
-
-    output_dir = Path(output_dir).expanduser().resolve()
-    catchlist = pd.read_csv(output_dir / "catchlist.csv", skipinitialspace=True)
-    path = output_dir / (name or f"forecast_uniform{flow_m3s:g}.csv")
-    pd.DataFrame({FORECAST_ID_COL: catchlist["Id"], FORECAST_FLOW_COL: flow_m3s}).to_csv(path, index=False)
-    logger.info(f"Wrote uniform {flow_m3s:g} m3/s forecast for {len(catchlist)} reaches: {path}")
     return path

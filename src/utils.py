@@ -55,7 +55,7 @@ def find_dam_shapefile(dam_dir):
     if not matches:
         raise FileNotFoundError(
             f"No {DAM_SHAPEFILE_NAME} or *{DAM_SHAPEFILE_NAME} in {dam_dir}; "
-            "add one or pass --dam-shapefile"
+            "add one, pass --dam-shapefile, or pass --dam-lat/--dam-lon to dam_catchments"
         )
     raise FileNotFoundError(
         f"Several dam shapefiles in {dam_dir}: {[m.name for m in matches]}; "
