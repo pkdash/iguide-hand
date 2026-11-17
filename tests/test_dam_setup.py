@@ -1,12 +1,15 @@
 """Offline tests for dam_setup.py (dam folder preparation used by the notebook and the CLI)."""
 
 import io
+import json
+import shutil
 import zipfile
 
 import geopandas as gpd
 import pytest
 
 import dam_setup
+import utils
 from conftest import GDB_STEM, HU4, LAT, LON, RASTER_STEM
 from utils import find_dam_shapefile
 
@@ -119,19 +122,142 @@ def test_download_into_dam_dir_and_reuse(tmp_path, offline_tnm):
     assert offline_tnm["url_lookups"] == [HU4]
 
 
-def test_download_into_shared_cache_links_dam_dirs(tmp_path, offline_tnm):
+def test_download_into_shared_cache_is_referenced_not_linked(tmp_path, offline_tnm):
     cache = tmp_path / "cache"
     dam_a, dam_b = tmp_path / "a", tmp_path / "b"
     dam_setup.download_nhdplus_hr(HU4, dam_a, cache_dir=cache, keep_zips=True)
     gdb_b, raster_b = dam_setup.download_nhdplus_hr(HU4, dam_b, cache_dir=cache)
 
     assert len(offline_tnm["downloads"]) == 2  # second dam reused the cache
+    assert offline_tnm["url_lookups"] == [HU4]  # ... without even listing the bucket
     assert (cache / f"{RASTER_STEM}.zip").exists()  # keep_zips
     for dam in (dam_a, dam_b):
-        assert (dam / RASTER_STEM).is_symlink()
-        assert (dam / RASTER_STEM).resolve() == (cache / RASTER_STEM).resolve()
-    assert (raster_b / "hydrodem.tif").exists()
-    assert gdb_b.name == f"{GDB_STEM}.gdb"
+        assert not any(p.is_symlink() for p in dam.iterdir())  # symlinks fail on Windows
+        ref = utils.read_nhdplus_ref(dam)
+        assert ref["hu4"] == HU4
+        assert ref["raster_dir"] == cache / RASTER_STEM
+        assert ref["gdb"] == cache / GDB_STEM / f"{GDB_STEM}.gdb"
+    assert raster_b == cache / RASTER_STEM and (raster_b / "hydrodem.tif").exists()
+    assert gdb_b == cache / GDB_STEM / f"{GDB_STEM}.gdb"
+
+
+def test_pointer_survives_moving_the_whole_tree(tmp_path, offline_tnm):
+    root = tmp_path / "root"
+    dam_setup.download_nhdplus_hr(HU4, root / "dams" / "x" / "inputs", cache_dir=root / "nhdplus")
+    shutil.move(root, tmp_path / "elsewhere")
+    inputs = tmp_path / "elsewhere" / "dams" / "x" / "inputs"
+    assert utils.find_nhdplus_raster_dir(inputs) == tmp_path / "elsewhere" / "nhdplus" / RASTER_STEM
+    assert utils.find_nhdplus_gdb(inputs).name == f"{GDB_STEM}.gdb"
+
+
+def test_pointer_stores_absolute_path_when_no_relative_one_exists(tmp_path, monkeypatch):
+    def other_drive(path, start=None):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(utils.os.path, "relpath", other_drive)
+    target = tmp_path / "r"
+    (tmp_path / "in").mkdir()
+    utils.write_nhdplus_ref(tmp_path / "in", raster_dir=target)
+    raw = json.loads((tmp_path / "in" / "nhdplus.json").read_text())
+    assert raw["raster_dir"] == str(target.resolve())
+
+
+def test_data_in_inputs_wins_over_pointer(tmp_path, offline_tnm):
+    inputs = tmp_path / "inputs"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=tmp_path / "cache")
+    local = inputs / "local_raster"
+    local.mkdir()
+    (local / "hydrodem.tif").write_bytes(b"")
+    assert utils.find_nhdplus_raster_dir(inputs) == local
+
+
+def test_stale_pointer_names_the_file(tmp_path):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    utils.write_nhdplus_ref(inputs, raster_dir=tmp_path / "gone", gdb=tmp_path / "gone.gdb")
+    for finder in (utils.find_nhdplus_raster_dir, utils.find_nhdplus_gdb):
+        with pytest.raises(FileNotFoundError, match="nhdplus.json"):
+            finder(inputs)
+
+
+def test_newer_cached_release_is_used(tmp_path, offline_tnm):
+    cache = tmp_path / "cache"
+    for stem in (f"NHDPLUS_H_{HU4}_HU4_20200101_RASTER", f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"):
+        (cache / stem).mkdir(parents=True)
+        (cache / stem / "hydrodem.tif").write_bytes(b"")
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache,
+                                                  products=("raster",))
+    assert raster_dir.name == f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"
+    assert offline_tnm["url_lookups"] == [] and offline_tnm["downloads"] == []
+
+
+def test_dated_cached_release_beats_undated_and_choice_is_logged(tmp_path, offline_tnm, caplog):
+    caplog.set_level("INFO")
+    cache = tmp_path / "cache"
+    for stem in (f"NHDPLUS_H_{HU4}_HU4_RASTER", f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"):
+        (cache / stem).mkdir(parents=True)
+        (cache / stem / "hydrodem.tif").write_bytes(b"")
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache,
+                                                  products=("raster",))
+    assert raster_dir.name == f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"
+    assert "cached releases" in caplog.text and f"NHDPLUS_H_{HU4}_HU4_RASTER" in caplog.text
+
+
+def test_incomplete_cached_folder_says_to_force_download(tmp_path, offline_tnm):
+    cache = tmp_path / "cache"
+    (cache / RASTER_STEM).mkdir(parents=True)  # no hydrodem.tif
+    with pytest.raises(FileNotFoundError, match="--force-download"):
+        dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache, products=("raster",))
+    assert offline_tnm["downloads"] == []
+    assert (cache / RASTER_STEM).is_dir()  # nothing deleted
+
+
+def test_force_download_replaces_cached_folder(tmp_path, offline_tnm):
+    cache, inputs = tmp_path / "cache", tmp_path / "in"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, keep_zips=True)
+    (cache / RASTER_STEM / "hydrodem.tif").write_bytes(b"damaged")
+    (cache / RASTER_STEM / "stray.txt").write_text("x")
+    offline_tnm["downloads"].clear()
+    gdb, raster_dir = dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, force=True)
+    assert sorted(offline_tnm["downloads"]) == [f"{GDB_STEM}.zip", f"{RASTER_STEM}.zip"]
+    assert raster_dir == cache / RASTER_STEM
+    assert (raster_dir / "hydrodem.tif").stat().st_size > len(b"damaged")
+    assert not (raster_dir / "stray.txt").exists()
+    assert not list(cache.glob("*.partial")) and not list(cache.glob("*.zip"))
+    assert utils.read_nhdplus_ref(inputs)["raster_dir"] == raster_dir
+
+
+def test_force_download_failure_keeps_the_old_copy(tmp_path, offline_tnm, monkeypatch):
+    cache, inputs = tmp_path / "cache", tmp_path / "in"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, products=("raster",))
+
+    def broken(url, dest, size=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(dam_setup, "_download", broken)
+    with pytest.raises(OSError):
+        dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, products=("raster",), force=True)
+    assert (cache / RASTER_STEM / "hydrodem.tif").exists()
+
+
+def test_force_download_refuses_data_placed_in_inputs(tmp_path, offline_tnm):
+    inputs = tmp_path / "in"
+    local = inputs / "local_raster"
+    local.mkdir(parents=True)
+    (local / "hydrodem.tif").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="move or delete it first"):
+        dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=tmp_path / "cache",
+                                      products=("raster",), force=True)
+    assert offline_tnm["downloads"] == [] and (local / "hydrodem.tif").exists()
+
+
+def test_force_download_replaces_data_extracted_into_the_dam_folder(tmp_path, offline_tnm):
+    dam_dir = tmp_path / "dam"  # cache_dir defaults to dam_dir
+    dam_setup.download_nhdplus_hr(HU4, dam_dir, products=("raster",))
+    offline_tnm["downloads"].clear()
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, dam_dir, products=("raster",), force=True)
+    assert offline_tnm["downloads"] == [f"{RASTER_STEM}.zip"]
+    assert (raster_dir / "hydrodem.tif").exists()
 
 
 def test_download_only_requested_products(tmp_path, offline_tnm):

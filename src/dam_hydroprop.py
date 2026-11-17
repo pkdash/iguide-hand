@@ -253,13 +253,14 @@ def main():
     parser.add_argument(
         "--dam-dir",
         default=None,
-        help="Per-dam input directory (e.g. data/<dam>); only used to pick the default --output-dir"
+        help="Dam folder (e.g. dams/<dam>); only used to pick the default --output-dir, "
+             "<dam-dir>/outputs. One of --dam-dir and --output-dir is required"
     )
     parser.add_argument(
         "--output-dir",
         default=None,
         help="Directory containing HAND workflow outputs; default location of all files below "
-             "(default: outputs/<dam-dir name> with --dam-dir, else outputs)"
+             "(default: <dam-dir>/outputs)"
     )
     parser.add_argument("--hand-raster", help="HAND raster (default: <output-dir>/hand.tif)")
     parser.add_argument("--catch-raster", help="Reach catchment raster (default: <output-dir>/w2.tif)")
@@ -280,7 +281,9 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     if args.output_dir is None:
-        args.output_dir = default_output_dir(args.dam_dir) if args.dam_dir else "outputs"
+        if args.dam_dir is None:
+            parser.error("pass --dam-dir (outputs in <dam-dir>/outputs) or --output-dir")
+        args.output_dir = default_output_dir(args.dam_dir)
 
     DamHydroProp(
         taudem_path=args.taudem_path,

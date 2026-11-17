@@ -37,7 +37,7 @@ import numpy as np
 import rasterio
 from shapely.geometry import Point
 
-from utils import read_run_info
+from utils import read_run_info, default_output_dir
 
 # Configure logging
 logging.basicConfig(
@@ -369,8 +369,12 @@ def main():
         description=("Generate outlets every N meters along the dam's downstream main stem "
                      "(TauDEM D8 network) for use by dam_hand.py")
     )
-    parser.add_argument("--work-dir", default="outputs",
-                        help="dam_hand output directory with p.tif, src.tif, outlet.shp (default: outputs)")
+    parser.add_argument("--dam-dir", default=None,
+                        help="Dam folder (e.g. dams/<dam>); sets the default --work-dir, "
+                             "<dam-dir>/outputs. One of --dam-dir and --work-dir is required")
+    parser.add_argument("--work-dir", default=None,
+                        help="dam_hand output directory with p.tif, src.tif, outlet.shp "
+                             "(default: <dam-dir>/outputs)")
     parser.add_argument("--output", default=None,
                         help="Output shapefile (default: <work-dir>/Outlets2_geo.shp)")
     parser.add_argument("--segment-length", type=float, default=2000.0,
@@ -394,6 +398,10 @@ def main():
                         help="Also write a reprojected copy, e.g. EPSG:26912 (NAD83 / UTM 12N)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
+    if args.work_dir is None:
+        if args.dam_dir is None:
+            parser.error("pass --dam-dir (work dir <dam-dir>/outputs) or --work-dir")
+        args.work_dir = default_output_dir(args.dam_dir)
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)

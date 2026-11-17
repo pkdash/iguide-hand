@@ -31,7 +31,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils import setup_taudem_path, run_taudem_command, default_output_dir, resolve_user_path
+from utils import (setup_taudem_path, run_taudem_command, default_output_dir, resolve_user_path,
+                   dam_inputs_dir, INPUTS_DIR_NAME)
 
 
 # Configure logging
@@ -217,15 +218,16 @@ class DamInundationAnalysis:
                 working directory and the default location of every file below
             hand_raster: HAND raster (default: <output_dir>/hand.tif)
             catch_raster: Reach catchment raster (default: <output_dir>/w2.tif)
-            forecast_file: Forecast flows CSV. A bare filename is looked up in dam_dir (if
-                given); other relative paths resolve from the current directory
+            forecast_file: Forecast flows CSV. A bare filename is looked up in <dam_dir>/inputs
+                (if dam_dir is given); other relative paths resolve from the current directory
                 (default: <output_dir>/forecast.csv)
             hydroprop_file: Hydraulic properties table (default: <output_dir>/hydroprop.csv)
             catchlist: Reach list CSV, used for ID checks (default: <output_dir>/catchlist.csv)
             inundation_raster: Output depth raster (default: <output_dir>/inundepth.tif)
             depth_table: Output depth summary (default: <output_dir>/depths.csv)
             np: Number of MPI processes
-            dam_dir: Per-dam input directory, used only to look up a bare --forecast-file name
+            dam_dir: Dam folder (dams/<dam>), used only to look up a bare --forecast-file name
+                in its inputs/ subfolder
         """
         self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -236,7 +238,10 @@ class DamInundationAnalysis:
         self.hand_raster = _resolve(hand_raster, "hand.tif")
         self.catch_raster = _resolve(catch_raster, "w2.tif")
         if forecast_file and dam_dir:
-            self.forecast_file = resolve_user_path(forecast_file, dam_dir)
+            inputs = Path(dam_dir).expanduser().resolve() / INPUTS_DIR_NAME
+            self.forecast_file = resolve_user_path(forecast_file, inputs)
+            if self.forecast_file.parent == inputs:  # a bare name, looked up in inputs/
+                dam_inputs_dir(dam_dir)  # raises if inputs/ is missing or dam_dir is an inputs/ folder
         else:
             self.forecast_file = _resolve(forecast_file, "forecast.csv")
         self.hydroprop_file = _resolve(hydroprop_file, "hydroprop.csv")
@@ -354,14 +359,15 @@ def main():
     parser.add_argument(
         "--dam-dir",
         default=None,
-        help="Per-dam input directory (e.g. data/<dam>); picks the default --output-dir and is where "
-             "a bare --forecast-file name is looked up"
+        help="Dam folder (e.g. dams/<dam>); picks the default --output-dir, <dam-dir>/outputs, and "
+             "a bare --forecast-file name is looked up in <dam-dir>/inputs. One of --dam-dir and "
+             "--output-dir is required"
     )
     parser.add_argument(
         "--output-dir",
         default=None,
         help="Directory containing HAND workflow outputs; default location of all files below "
-             "(default: outputs/<dam-dir name> with --dam-dir, else outputs)"
+             "(default: <dam-dir>/outputs)"
     )
     parser.add_argument("--hand-raster", help="HAND raster (default: <output-dir>/hand.tif)")
     parser.add_argument("--catch-raster", help="Reach catchment raster (default: <output-dir>/w2.tif)")
@@ -370,7 +376,7 @@ def main():
     forecast.add_argument(
         "--forecast-file",
         help=f"Forecast CSV with columns '{FORECAST_ID_COL}, {FORECAST_FLOW_COL}' keyed to this run's "
-             "reaches; with --dam-dir a bare filename is looked up there, other paths are relative "
+             "reaches; with --dam-dir a bare filename is looked up in <dam-dir>/inputs, other paths are relative "
              "to the current directory"
     )
     forecast.add_argument(
@@ -399,7 +405,9 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     if args.output_dir is None:
-        args.output_dir = default_output_dir(args.dam_dir) if args.dam_dir else "outputs"
+        if args.dam_dir is None:
+            parser.error("pass --dam-dir (outputs in <dam-dir>/outputs) or --output-dir")
+        args.output_dir = default_output_dir(args.dam_dir)
 
     forecast_file = args.forecast_file
     if args.uniform_flow is not None:

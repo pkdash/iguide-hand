@@ -38,7 +38,7 @@ The workflow produces HAND rasters, stream networks, and catchment data required
 
 Places outlet points at fixed along-stream intervals (default 2 km) on the TauDEM D8 main stem below the dam. It traces `p.tif` from the snapped dam outlet (`outlet.shp`) along the dam's stream grid (`src.tif`). Outlets go on the TauDEM network rather than on hydrofabric/NHD flowlines because HAND, `streamnet` and the catchments are all defined on that grid; vector flowlines from another DEM drift off the D8 path. A short last reach (< `--min-segment-length`, default half the segment length) is merged into the reach above. The trace ends at `--max-distance` meters below the dam if given; otherwise just upstream of where it first enters a large lake or reservoir from `--waterbody-path` (NHDPlus HR `NHDWaterbody`; by default the HU4 GDB recorded by `dam_catchments` in `run_info.json`); otherwise at the end of `src.tif`. The stretch below the end gets `DSNODEID = -1` and is left out of `catchlist.csv`. `--confluence-ratio` optionally adds breaks just above major tributary confluences (where contributing area jumps by more than the given fraction). The output has the same schema as the hand-made `Outlets2_utm.shp` (`ID` = 1 for the dam, 0 otherwise), plus `type` and `dist_m` (distance below the dam).
 
-It runs automatically inside `dam_hand` when `--segment-length` is given. It can also run on its own (`uv run dam_outlets --work-dir outputs/mountain_dell --to-crs EPSG:26912`) on an existing `dam_hand` output directory, so you can inspect or edit the outlets in GIS and pass them back through `--outlets-on-reaches`.
+It runs automatically inside `dam_hand` when `--segment-length` is given. It can also run on its own (`uv run dam_outlets --work-dir dams/mountain_dell/outputs --to-crs EPSG:26912`) on an existing `dam_hand` output directory, so you can inspect or edit the outlets in GIS and pass them back through `--outlets-on-reaches`.
 
 **Note:** Reach IDs (`LINKNO` in `net2.shp` / `Id` in `catchlist.csv`) change whenever the outlets change, so `forecast.csv` must be keyed to the IDs from the same run.
 
@@ -108,74 +108,122 @@ All three options install only the command-line pipeline (`geopandas`, `rasterio
 
 ### Data Setup
 
-The `data/` directory is not in the repository; create it next to the project root. Each dam has its own self-contained folder, `data/<dam>/`, passed as `--dam-dir`. It holds the dam's inputs and the NHDPlus HR HU4 dataset for the HU4 that contains the dam.
+Dam data lives in a `dams/` folder next to the project root. It is not in the repository. Each dam has one folder, `dams/<dam>/`, which you pass as `--dam-dir`. It holds two subfolders: `inputs/` for what you provide and `outputs/` for what the pipeline writes. Downloaded NHDPlus HR data goes into a shared `nhdplus/` folder next to `dams/`, so dams in the same HU4 share one copy. This applies when the dam folder is directly under a folder named `dams`; for a dam folder anywhere else the download goes into `<dam-dir>/nhdplus/` instead, and you can pass `--nhd-cache-dir` to share a folder.
+
+```text
+<project root>/
+├── nhdplus/                                  # shared NHDPlus HR downloads, one per HU4
+│   ├── NHDPLUS_H_1602_HU4_20220412_GDB/
+│   │   └── NHDPLUS_H_1602_HU4_20220412_GDB.gdb
+│   └── NHDPLUS_H_1602_HU4_20220412_RASTER/
+│       ├── hydrodem.tif
+│       └── ...
+└── dams/
+    ├── mountain_dell/                        # --dam-dir dams/mountain_dell
+    │   ├── inputs/
+    │   │   ├── mountain_dell_dam_location.shp
+    │   │   ├── stage.txt
+    │   │   ├── forecast.csv                  # optional
+    │   │   ├── Outlets2_utm.shp              # optional
+    │   │   └── nhdplus.json                  # points to ../../../nhdplus/...
+    │   └── outputs/                          # written by the pipeline
+    │       ├── run_info.json
+    │       ├── clipped/
+    │       ├── hand.tif, catchlist.csv, hydroprop.csv, inundepth.tif, ...
+    └── beach_city/
+        ├── inputs/                           # HU4 0504 (Muskingum)
+        └── outputs/
+```
+
+To start a dam over, delete `dams/<dam>/outputs/`. Do not delete the whole dam folder: that also removes your inputs. To keep several runs of one dam, for example with different reach lengths, pass `--output-dir dams/<dam>/outputs_1km` to every stage.
 
 #### Quick start: from the dam's coordinates
 
 If you have only the dam's latitude and longitude, let `dam_catchments` build the dam folder:
 
 ```bash
-uv run dam_catchments --dam-dir data/my_dam --dam-lat 40.750594 --dam-lon -111.721088 --nhd-cache-dir data
+uv run dam_catchments --dam-dir dams/my_dam --dam-lat 40.750594 --dam-lon -111.721088
 ```
 
-It creates `data/my_dam/` if needed and adds whatever is missing:
+It creates `dams/my_dam/inputs/` if needed and adds whatever is missing:
 
 - `my_dam_dam_location.shp`, the dam point (EPSG:4326). Name the file with `--dam-name`; `--dam-label "My Dam"` sets the readable name stored in its `Dam_Name` field.
 - `stage.txt` with default stage heights from 0.1 to 40 m. Edit it to change them.
-- The NHDPlus HR GDB and raster folder for the HU4 that contains the dam. The HU4 is looked up from the USGS WBD map service; pass `--hu4` to skip the lookup. The zips are downloaded from the USGS National Map bucket and extracted into `--nhd-cache-dir`, then linked into the dam folder. Use one cache folder, such as `data/`, so dams in the same HU4 download the data only once. The raster zip is 1–6 GB, so allow about 3× that in free disk space. `--keep-zips` keeps the zips.
+- The NHDPlus HR GDB and raster folder for the HU4 that contains the dam. The HU4 is looked up from the USGS WBD map service; pass `--hu4` to skip the lookup. The zips are downloaded from the USGS National Map bucket and extracted into the shared `nhdplus/` folder, or into `--nhd-cache-dir` if you set it. If that folder already holds the HU4, nothing is downloaded. The raster zip is 1–6 GB, so allow about 3× that in free disk space. `--keep-zips` keeps the zips.
+- `nhdplus.json`, which records where that GDB and raster folder are. Paths are relative to `inputs/`, so the whole project folder can be moved or synced. No symlinks are used, so this works on Windows without admin rights or Developer Mode.
 
-Existing files are kept, so you can rerun the same command; once the NHDPlus data is in the dam folder, a rerun needs no network access. If a dam shapefile already in the folder is more than 10 m from `--dam-lat`/`--dam-lon`, `dam_catchments` stops with an error instead of using the old point; delete that shapefile to use the new coordinates. With `--huc12-gdb` or `--raster-dir`, only the other product is downloaded. Put the point on the channel just below the dam embankment: NID coordinates often fall in the reservoir, where the DEM is flat (see `--dam-move-distance` below).
+Existing files are kept, so you can rerun the same command; once the NHDPlus data is available, a rerun needs no network access. If a dam shapefile already in the folder is more than 10 m from `--dam-lat`/`--dam-lon`, `dam_catchments` stops with an error instead of using the old point; delete that shapefile to use the new coordinates. With `--huc12-gdb` or `--raster-dir`, only the other product is downloaded. Put the point on the channel just below the dam embankment: NID coordinates often fall in the reservoir, where the DEM is flat (see `--dam-move-distance` below).
 
-The other stages need no extra flags; they read the dam folder and `run_info.json` as usual.
+The other stages need no extra flags; they read `dams/<dam>/inputs/` and `dams/<dam>/outputs/run_info.json`.
 
-#### Dam inputs
+#### Dam inputs (`dams/<dam>/inputs/`)
 
-- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile` (a bare filename is looked up in the dam folder).
+- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile` (a bare filename is looked up in `inputs/`).
 - **Stage data**: `stage.txt`, the stage heights (m) used to build the rating curves.
 - **Forecast data** (optional): `forecast.csv` with per-reach discharge (`Id, flow_m3s`), keyed to the reach IDs of the current `dam_hand` run. You can supply it later through `dam_inundation --forecast-file`.
 - **Outlet locations** (optional): `Outlets2_utm.shp`, defining the reach outlets. It is not needed when `dam_hand` runs with `--segment-length`.
 
 #### NHDPlus HR dataset for the dam's HU4
 
-Download the NHDPlus HR geodatabase and raster set for the HU4 that contains the dam, and unzip both into the dam folder. `dam_catchments` finds them automatically:
+`dam_catchments` finds the NHDPlus HR data for the dam's HU4 in this order:
 
-- **HU4 geodatabase**: the single `*.gdb` with a `WBDHU12` layer, directly in the dam folder or one subfolder down, for example `NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb`. It provides the `WBDHU12` layer for the downstream HUC12 walk, and the `NHDWaterbody` layer for the lake/reservoir stop. Other geodatabases, such as `elev_source.gdb` in the raster folder, are ignored.
-- **HU4 raster folder**: the single subfolder containing `hydrodem.tif`, for example `NHDPLUS_H_1602_HU4_20220412_RASTER/` (it also holds `fdr.tif`, `elev_cm.tif`, and so on).
+1. **In `inputs/` itself**, if you unzipped it there by hand:
+   - **HU4 geodatabase**: the single `*.gdb` with a `WBDHU12` layer, directly in `inputs/` or one subfolder down, for example `NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb`. It provides the `WBDHU12` layer for the downstream HUC12 walk, and the `NHDWaterbody` layer for the lake/reservoir stop. Other geodatabases, such as `elev_source.gdb` in the raster folder, are ignored.
+   - **HU4 raster folder**: the single subfolder containing `hydrodem.tif`, for example `NHDPLUS_H_1602_HU4_20220412_RASTER/` (it also holds `fdr.tif`, `elev_cm.tif`, and so on).
+2. **Through `inputs/nhdplus.json`**, which `--dam-lat`/`--dam-lon` writes. You can also write it by hand:
 
-To use NHDPlus data stored elsewhere, pass `--huc12-gdb` and `--raster-dir` to `dam_catchments`. A bare name (no directory part) is looked up in the dam folder; any other relative path, including `./name`, is taken from the current directory. You can also symlink the folders into the dam folder.
+   ```json
+   {"hu4": "1602",
+    "gdb": "../../../nhdplus/NHDPLUS_H_1602_HU4_20220412_GDB/NHDPLUS_H_1602_HU4_20220412_GDB.gdb",
+    "raster_dir": "../../../nhdplus/NHDPLUS_H_1602_HU4_20220412_RASTER"}
+   ```
 
-#### Example directory structure
+   Relative paths are relative to `inputs/`; absolute paths also work. If a path no longer exists, `dam_catchments` says so. Rerunning it with `--dam-lat`/`--dam-lon` repairs the file: it finds the data again in the cache or downloads it.
+
+To use NHDPlus data stored elsewhere for a single run, pass `--huc12-gdb` and `--raster-dir` to `dam_catchments`. A bare name (no directory part) is looked up in `inputs/`; any other relative path, including `./name`, is taken from the current directory.
+
+#### Outputs
+
+By default, every stage writes to `dams/<dam>/outputs/`. This does not depend on the folder you run the command from, so runs for different dams do not overwrite each other. `dam_hydroprop`, `dam_inundation` and `dam_outlets` need either `--dam-dir` or an explicit `--output-dir` (`--work-dir` for `dam_outlets`).
+
+#### Migrating data from the old layout
+
+Earlier versions kept inputs in `data/<dam>/` and outputs in `outputs/<dam>/`. The scripts do not detect that layout. `--dam-dir` pointing at an old folder gives a "No inputs/ folder" error, and `dam_catchments --dam-lat/--dam-lon` would create a new, empty `inputs/` beside the old files. Move the data first. The target layout is:
 
 ```text
-data/
-├── mountain_dell/
-│   ├── mountain_dell_dam_location.shp
-│   ├── stage.txt
-│   ├── forecast.csv
-│   ├── Outlets2_utm.shp
-│   ├── NHDPLUS_H_1602_HU4_20220412_GDB/
-│   │   └── NHDPLUS_H_1602_HU4_20220412_GDB.gdb
-│   └── NHDPLUS_H_1602_HU4_20220412_RASTER/
-│       ├── hydrodem.tif
-│       └── ...
-└── beach_city_dam/
-    ├── beach_city_dam_location.shp
-    ├── stage.txt
-    ├── NHDPLUS_H_0504_HU4_GDB/      # Beach City Dam is in HU4 0504 (Muskingum)
-    └── NHDPLUS_H_0504_HU4_RASTER/
+dams/<dam>/inputs/     dam point, stage.txt, forecast.csv, Outlets2_utm.shp, nhdplus.json
+dams/<dam>/outputs/    earlier results (optional)
+nhdplus/               NHDPlus HR downloads, shared by dams in the same HU4
 ```
 
-By default, every stage writes to `outputs/<dam>/`, named after the `--dam-dir` folder, so runs for different dams do not overwrite each other.
+1. Create the folders: `mkdir -p dams/<dam>/inputs nhdplus`.
+2. Move the NHDPlus HR GDB and raster folders (`NHDPLUS_H_<hu4>_HU4_*_GDB`, `..._RASTER`) into `nhdplus/`, one copy per HU4. If `data/<dam>/` holds symlinks to them, delete the symlinks first; they break once moved.
+3. Move everything else in `data/<dam>/` (dam point shapefile, `stage.txt`, `forecast.csv`, `Outlets2_utm.shp`) into `dams/<dam>/inputs/`.
+4. Optionally keep earlier results: move `outputs/<dam>` to `dams/<dam>/outputs`.
+5. Run `dam_catchments` once with the dam's coordinates and HU4. It finds the data in `nhdplus/` without downloading, writes `inputs/nhdplus.json`, and refreshes `outputs/run_info.json`.
+
+For Mountain Dell:
+
+```bash
+mkdir -p dams/mountain_dell/inputs nhdplus
+mv data/NHDPLUS_H_1602_HU4_*_GDB data/NHDPLUS_H_1602_HU4_*_RASTER nhdplus/   # wherever they are now
+rm -f data/mountain_dell/NHDPLUS_H_*                                           # old symlinks, if any
+mv data/mountain_dell/* dams/mountain_dell/inputs/
+mv outputs/mountain_dell dams/mountain_dell/outputs                            # optional
+uv run dam_catchments --dam-dir dams/mountain_dell --dam-lat 40.750594 --dam-lon -111.721088 --hu4 1602
+```
+
+On Windows, move the folders in File Explorer. Reach `LINKNO`s change with each HAND run, so a `forecast.csv` from an earlier run must still match the new `catchlist.csv`.
 
 ## Running in JupyterHub
 
-`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_LABEL`, `DAM_LAT`, `DAM_LON`) and run all cells. `DAM_LABEL` is the dam's name, such as `"Mountain Dell Dam"`. It goes into the dam shapefile and the plot titles, and the folder name for `data/<dam>/` and `outputs/<dam>/` is derived from it (`mountain_dell`: lowercase, `_` for spaces and punctuation, a trailing "dam" dropped). Set `DAM_NAME` to choose the folder name yourself. The notebook uses `src/dam_setup.py` to:
+`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_LABEL`, `DAM_LAT`, `DAM_LON`) and run all cells. `DAM_LABEL` is the dam's name, such as `"Mountain Dell Dam"`. It goes into the dam shapefile and the plot titles, and the dam folder name `dams/<dam>/` is derived from it (`mountain_dell`: lowercase, `_` for spaces and punctuation, a trailing "dam" dropped). Set `DAM_NAME` to choose the folder name yourself. The notebook uses `src/dam_setup.py` to:
 
 - find the HU4 that contains the dam;
 - download that HU4's NHDPlus HR GDB and raster zips from the USGS National Map bucket (the raster zip is 1–6 GB);
-- write the dam point shapefile and a default `stage.txt` into `data/<dam>/`.
+- write the dam point shapefile, a default `stage.txt` and `nhdplus.json` into `dams/<dam>/inputs/`.
 
-Existing files are kept. Set `NHD_CACHE_DIR` to a shared folder (e.g. `data/`) so dams in the same HU4 download the data only once.
+Existing files are kept. The NHDPlus HR data goes into the shared `nhdplus/` folder, so dams in the same HU4 download it only once; set `NHD_CACHE_DIR` to use another folder. Results go to `dams/<dam>/outputs/`.
 
 TauDEM (>= 5.4.0) and MPI must already be installed; set `TAUDEM_PATH` in the notebook. One-time setup from the repo root:
 
@@ -195,7 +243,7 @@ Follow this sequence for a complete analysis. The examples use Mountain Dell Dam
 Calculate downstream HUC12s and prepare clipped datasets to optimize performance.
 
 ```bash
-uv run dam_catchments --dam-dir data/mountain_dell
+uv run dam_catchments --dam-dir dams/mountain_dell
 ```
 
 For all options, run `uv run dam_catchments --help`.
@@ -205,9 +253,9 @@ This command will:
 - Calculate the bounding box for all HUC12 watersheds downstream from the dam location
 - Clip all NHDPlus rasters to the calculated bounding box
 - Add a 4000-meter buffer around the bounding box before clipping
-- Save clipped rasters to `outputs/<dam>/clipped/`
+- Save clipped rasters to `dams/<dam>/outputs/clipped/`
 - Generate processing reports and downstream HUC12 shapefiles
-- Record the inputs in `outputs/<dam>/run_info.json`; `dam_hand` and `dam_outlets` read the HU4 GDB path from this file
+- Record the inputs in `dams/<dam>/outputs/run_info.json`; `dam_hand` and `dam_outlets` read the HU4 GDB path from this file
 
 The downstream walk stops at whichever comes first:
 - `--max-distance` (default 100 km);
@@ -218,14 +266,14 @@ Only one HU4 is supported. If the river leaves the HU4 before the distance limit
 
 **Arguments:**
 
-- `--dam-dir` (required): Per-dam input directory.
-- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `--dam-dir` (default: found in `--dam-dir`).
-- `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam; a bare name is looked up in `--dam-dir` (default: found in `--dam-dir`).
-- `--raster-dir`: NHDPlus HR HU4 raster directory to clip; a bare name is looked up in `--dam-dir` (default: found in `--dam-dir`).
+- `--dam-dir` (required): Dam folder, `dams/<dam>`, with `inputs/` and `outputs/` subfolders.
+- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `<dam-dir>/inputs` (default: found there).
+- `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam; a bare name is looked up in `<dam-dir>/inputs` (default: found in `inputs/`, else through `inputs/nhdplus.json`).
+- `--raster-dir`: NHDPlus HR HU4 raster directory to clip; a bare name is looked up in `<dam-dir>/inputs` (default: found in `inputs/`, else through `inputs/nhdplus.json`).
 - `--ref-projection-raster`: Reference raster for the target projection (default: `<raster-dir>/hydrodem.tif`).
 - `--max-distance`: Maximum downstream distance in km (default: 100).
 - `--buffer`: Extension distance (meters) around the bounding box (default: 4000).
-- `--output-dir`: Directory for output files (default: `outputs/<dam>`).
+- `--output-dir`: Directory for output files (default: `dams/<dam>/outputs`).
 - `--clipped-dir`: Subdirectory for clipped rasters within `--output-dir` (default: `clipped`).
 - `--no-clip-rasters`: Only compute the bounding box.
 
@@ -235,18 +283,19 @@ Dam setup from coordinates (see [Quick start](#quick-start-from-the-dams-coordin
 - `--dam-name`: Name for `<dam-name>_dam_location.shp` (default: the `--dam-dir` folder name).
 - `--dam-label`: Readable dam name for the shapefile's `Dam_Name` field, e.g. `"Mountain Dell Dam"` (default: the `--dam-name` value).
 - `--hu4`: 4-digit HUC containing the dam (default: looked up from the coordinates).
-- `--nhd-cache-dir`: Folder to extract the NHDPlus HR downloads into; relative to the current directory (default: `--dam-dir`).
+- `--nhd-cache-dir`: Folder to extract the NHDPlus HR downloads into, recorded in `inputs/nhdplus.json`; relative to the current directory (default: `nhdplus/` next to `dams/` when `--dam-dir` is directly under a folder named `dams`, e.g. `nhdplus/` for `dams/my_dam`; otherwise `nhdplus/` inside `--dam-dir`). The chosen folder is logged.
 - `--keep-zips`: Keep the downloaded zip files.
+- `--force-download`: Download the NHDPlus HR data again and replace the copy in the cache folder, even if the dam already has it, for example after a damaged or incomplete download. The old copy is replaced only once the new one is extracted, so a failed download keeps it. Products given by `--huc12-gdb`/`--raster-dir` are not touched. It stops with an error if the data sits directly in `inputs/`, because that copy would still be used first; move it away first. Other dams that share the cache folder see the new copy.
 
-`--dam-name`, `--dam-label`, `--hu4`, `--nhd-cache-dir` and `--keep-zips` need `--dam-lat`/`--dam-lon`.
+`--dam-name`, `--dam-label`, `--hu4`, `--nhd-cache-dir`, `--keep-zips` and `--force-download` need `--dam-lat`/`--dam-lon`.
 
 **Outputs:**
 
-- `outputs/<dam>/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
-- `outputs/<dam>/bounding_box_coordinates.txt`: CRS and coordinate bounds.
-- `outputs/<dam>/processing_report.txt`: Log of the catchment analysis, including the stop reason.
-- `outputs/<dam>/run_info.json`: Input paths used by later stages, plus `hu4` when it was looked up for `--dam-lat`/`--dam-lon`.
-- `outputs/<dam>/clipped/`: Directory containing trimmed NHDPlus rasters.
+- `dams/<dam>/outputs/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
+- `dams/<dam>/outputs/bounding_box_coordinates.txt`: CRS and coordinate bounds.
+- `dams/<dam>/outputs/processing_report.txt`: Log of the catchment analysis, including the stop reason.
+- `dams/<dam>/outputs/run_info.json`: Input paths used by later stages, plus `hu4` when it was looked up for `--dam-lat`/`--dam-lon`.
+- `dams/<dam>/outputs/clipped/`: Directory containing trimmed NHDPlus rasters.
 
 ### 2. HAND Calculation Workflow
 
@@ -255,15 +304,15 @@ Generate the Height Above Nearest Drainage (HAND) raster using TauDEM tools.
 ```bash
 uv run dam_hand \
   --taudem-path /usr/local/bin \
-  --dam-dir data/mountain_dell
+  --dam-dir dams/mountain_dell
 ```
 
-`dam_hand` reads clipped rasters from `outputs/<dam>/clipped` and writes to `outputs/<dam>`. It reads the dam shapefile, `stage.txt`, `forecast.csv` and the outlets shapefile directly from `--dam-dir` (no subfolders).
+`dam_hand` reads clipped rasters from `dams/<dam>/outputs/clipped` and writes to `dams/<dam>/outputs`. It reads the dam shapefile, `stage.txt`, `forecast.csv` and the outlets shapefile directly from `dams/<dam>/inputs/` (no subfolders).
 
 To generate 2 km reach outlets instead of using `Outlets2_utm.shp`:
 
 ```bash
-uv run dam_hand --taudem-path /usr/local/bin --dam-dir data/mountain_dell --segment-length 2000
+uv run dam_hand --taudem-path /usr/local/bin --dam-dir dams/mountain_dell --segment-length 2000
 ```
 
 For all options, run `uv run dam_hand --help`.
@@ -280,12 +329,12 @@ This command will:
 **Arguments:**
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
-- `--dam-dir` (required): Per-dam input directory.
-- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `--dam-dir` (default: found in `--dam-dir`).
-- `--output-dir`: Directory to save HAND results (default: `outputs/<dam>`).
+- `--dam-dir` (required): Dam folder, `dams/<dam>`.
+- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `<dam-dir>/inputs` (default: found there).
+- `--output-dir`: Directory to save HAND results (default: `dams/<dam>/outputs`).
 - `--clipped-dir`: Folder containing clipped rasters from step 1 (default: `<output-dir>/clipped`).
 - `--dam-move-distance`: How far, in cells, the dam point may move down its flow path to reach the stream grid (default: 200). If it does not reach a stream, for example because the dam coordinate lies in the reservoir or on the embankment, a prominent warning is logged: the main stem would then start on a hillslope path. Fix the dam point or raise this value. A warning is also logged if the snapped point lies inside an NHDPlus lake or reservoir. The DEM is flat there, so the route TauDEM takes across the reservoir may leave by the wrong side instead of through the dam. Put the dam point on the channel just below the embankment; NID coordinates often fall in the reservoir.
-- `--outlets-on-reaches`: Name of outlets shapefile in `--dam-dir`
+- `--outlets-on-reaches`: Name of outlets shapefile in `<dam-dir>/inputs`
   (default: Outlets2_utm.shp). Ignored when `--segment-length` is set.
 - `--segment-length`: Generate outlets every N meters along the dam's main
   stem (e.g. 2000) instead of reading `--outlets-on-reaches`.
@@ -296,7 +345,7 @@ This command will:
 - `--waterbody-path`: With `--segment-length`, NHDPlus HR GDB whose
   `NHDWaterbody` layer ends the main stem just upstream of the first lake or
   reservoir (FType 390/436) of at least `--min-waterbody-area` km² (default:
-  the GDB recorded by `dam_catchments` in `run_info.json`, else the GDB in `--dam-dir`). Waterbodies
+  the GDB recorded by `dam_catchments` in `run_info.json`, else the GDB in `<dam-dir>/inputs`). Waterbodies
   within 500 m of the dam (its own reservoir) are ignored. If no default is
   available, or the GDB has no
   waterbodies near the main stem, the main stem runs to the end of `src.tif`
@@ -317,10 +366,10 @@ This command will:
 
 **Outputs:**
 
-- `outputs/<dam>/hand.tif`: Height Above Nearest Drainage raster.
-- `outputs/<dam>/w2.tif`: Catchment raster.
-- `outputs/<dam>/catchlist.csv`: List of catchment properties.
-- `outputs/<dam>/slp.tif`: Slope raster.
+- `dams/<dam>/outputs/hand.tif`: Height Above Nearest Drainage raster.
+- `dams/<dam>/outputs/w2.tif`: Catchment raster.
+- `dams/<dam>/outputs/catchlist.csv`: List of catchment properties.
+- `dams/<dam>/outputs/slp.tif`: Slope raster.
 - Various intermediate files generated by TauDEM tools.
 
 #### Flat reaches
@@ -345,10 +394,10 @@ Build the per-reach hydraulic properties table from the HAND outputs. Run this o
 ```bash
 uv run dam_hydroprop \
   --taudem-path /usr/local/bin \
-  --dam-dir data/mountain_dell
+  --dam-dir dams/mountain_dell
 ```
 
-`--dam-dir` only picks the default `--output-dir` (`outputs/<dam>`). Every file flag defaults to a path inside `--output-dir`. Run `uv run dam_hydroprop --help` to see them all.
+`--dam-dir` only picks the default `--output-dir` (`dams/<dam>/outputs`). Every file flag defaults to a path inside `--output-dir`. Run `uv run dam_hydroprop --help` to see them all.
 
 This command will:
 
@@ -359,8 +408,8 @@ This command will:
 **Arguments:**
 
 - `--taudem-path`: Directory containing TauDEM executable binaries.
-- `--dam-dir`: Per-dam input directory; sets the default `--output-dir` to `outputs/<dam>`.
-- `--output-dir`: Directory with the `dam_hand` outputs (default: `outputs/<dam>` with `--dam-dir`, else `outputs`). It is also the default location of every file below.
+- `--dam-dir`: Dam folder; sets the default `--output-dir` to `dams/<dam>/outputs`.
+- `--output-dir`: Directory with the `dam_hand` outputs (default: `dams/<dam>/outputs`; one of `--dam-dir` and `--output-dir` is required). It is also the default location of every file below.
 - `--hand-raster`, `--catch-raster`, `--catchlist`, `--slope-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`, `catchlist.csv`, `slp.tif`).
 - `--stage-file`: Stage heights in metres, one per line (default `stage.txt`). For dam-break floods, extend the stages high enough that the top stage's discharge exceeds the expected peak flow.
 - `--hydroprop-file`: Output table (default `hydroprop.csv`).
@@ -368,7 +417,7 @@ This command will:
 
 **Outputs:**
 
-- `outputs/<dam>/hydroprop.csv`: Hydraulic properties table (synthetic rating curves).
+- `dams/<dam>/outputs/hydroprop.csv`: Hydraulic properties table (synthetic rating curves).
 
 ### 4. Inundation Mapping
 
@@ -377,19 +426,19 @@ Generate inundation depths for a flow scenario. You can run this step many times
 ```bash
 uv run dam_inundation \
   --taudem-path /usr/local/bin \
-  --dam-dir data/mountain_dell \
-  --forecast-file data/mountain_dell/forecast.csv \
-  --inundation-raster outputs/mountain_dell/inundepth_peak.tif \
-  --depth-table outputs/mountain_dell/depths_peak.csv
+  --dam-dir dams/mountain_dell \
+  --forecast-file dams/mountain_dell/inputs/forecast.csv \
+  --inundation-raster dams/mountain_dell/outputs/inundepth_peak.tif \
+  --depth-table dams/mountain_dell/outputs/depths_peak.csv
 ```
 
 Without a forecast, map the same flow on every reach:
 
 ```bash
-uv run dam_inundation --taudem-path /usr/local/bin --dam-dir data/mountain_dell --uniform-flow 4000
+uv run dam_inundation --taudem-path /usr/local/bin --dam-dir dams/mountain_dell --uniform-flow 4000
 ```
 
-This writes `outputs/<dam>/forecast_uniform4000.csv` from `catchlist.csv` and maps it.
+This writes `dams/<dam>/outputs/forecast_uniform4000.csv` from `catchlist.csv` and maps it.
 
 This command will:
 
@@ -413,9 +462,9 @@ Whitespace after commas is allowed, and extra columns are ignored. A script that
 
 **Arguments:**
 
-- `--taudem-path`, `--output-dir`, `--np`: As for `dam_hydroprop`.
+- `--taudem-path`, `--dam-dir`, `--output-dir`, `--np`: As for `dam_hydroprop`.
 - `--hand-raster`, `--catch-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`).
-- `--forecast-file`: Forecast flows. A bare filename is looked up in `--dam-dir`; any other path is relative to the current directory. There is no default: to use the `forecast.csv` in the dam folder, pass `--forecast-file forecast.csv` with `--dam-dir`.
+- `--forecast-file`: Forecast flows. A bare filename is looked up in `<dam-dir>/inputs`; any other path is relative to the current directory. There is no default: to use the `forecast.csv` in the inputs folder, pass `--forecast-file forecast.csv` with `--dam-dir`.
 - `--uniform-flow`: Instead of `--forecast-file`, one flow (m³/s, > 0) for every reach in `--catchlist`. Writes `<output-dir>/forecast_uniform<flow>.csv`.
 - `--hydroprop-file`: Table from `dam_hydroprop` (default `hydroprop.csv`).
 - `--catchlist`: Reach list used for the ID check (default `catchlist.csv`).
@@ -423,8 +472,8 @@ Whitespace after commas is allowed, and extra columns are ignored. A script that
 
 **Outputs:**
 
-- `outputs/<dam>/inundepth.tif`: Flood inundation depth raster.
-- `outputs/<dam>/depths.csv`: Per-reach summary of flow, stage depth, inundated area, and inundation ratio.
+- `dams/<dam>/outputs/inundepth.tif`: Flood inundation depth raster.
+- `dams/<dam>/outputs/depths.csv`: Per-reach summary of flow, stage depth, inundated area, and inundation ratio.
 
 ## Development Setup
 
@@ -535,8 +584,8 @@ iguide-hand/
 │   └── utils.py         # Utility functions
 ├── notebooks/
 │   └── dam_inundation_pipeline.ipynb # Full pipeline from a dam's lat/lon (see Running in JupyterHub)
-├── data/                # Input data files (not in repo)
-├── outputs/             # Generated output files (not in repo)
+├── dams/                # One folder per dam: <dam>/inputs, <dam>/outputs (not in repo)
+├── nhdplus/             # Shared NHDPlus HR downloads (not in repo)
 ├── tests/               # pytest suite (uv run pytest)
 ├── pyproject.toml       # Project configuration and dependencies
 ├── README.md           # This file
