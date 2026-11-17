@@ -7,6 +7,7 @@ import zipfile
 
 import geopandas as gpd
 import pytest
+from shapely.geometry import LineString, MultiPoint, Point
 
 import dam_setup
 import utils
@@ -292,6 +293,43 @@ def test_dam_slug(label, slug):
 def test_dam_slug_empty_raises(label):
     with pytest.raises(ValueError, match="Cannot make a folder name"):
         dam_setup.dam_slug(label)
+
+
+# --- read_dam_point -----------------------------------------------------------------------
+
+def _shapefile(path, geoms, crs=4326):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gpd.GeoDataFrame({"ID": list(range(len(geoms)))}, geometry=geoms, crs=crs).to_file(path)
+    return path
+
+
+def test_read_dam_point_reprojects_to_wgs84(tmp_path):
+    utm = gpd.GeoSeries(gpd.points_from_xy([LON], [LAT]), crs=4326).to_crs(32612)
+    shp = _shapefile(tmp_path / "dam.shp", list(utm), crs=32612)
+    assert dam_setup.read_dam_point(shp) == pytest.approx((LAT, LON))
+
+
+@pytest.mark.parametrize("geoms, message", [
+    ([Point(LON, LAT), Point(LON + 0.01, LAT)], "2 features"),
+    ([LineString([(LON, LAT), (LON + 0.01, LAT)])], "LineString"),
+    ([MultiPoint([(LON, LAT)])], "MultiPoint"),
+    ([Point(500000, 4500000)], "not a valid location"),  # UTM numbers with a WGS84 .prj
+])
+def test_read_dam_point_rejects_anything_but_one_point(tmp_path, geoms, message):
+    shp = _shapefile(tmp_path / "dam.shp", geoms)
+    with pytest.raises(ValueError, match=message):
+        dam_setup.read_dam_point(shp)
+
+
+def test_read_dam_point_needs_prj_and_shp(tmp_path):
+    shp = _shapefile(tmp_path / "dam.shp", [Point(LON, LAT)])
+    shp.with_suffix(".prj").unlink()
+    with pytest.raises(ValueError, match="no coordinate system"):
+        dam_setup.read_dam_point(shp)
+    with pytest.raises(ValueError, match="not a shapefile"):
+        dam_setup.read_dam_point(tmp_path / "dam.gpkg")
+    with pytest.raises(FileNotFoundError):
+        dam_setup.read_dam_point(tmp_path / "missing.shp")
 
 
 # --- write_dam_point / write_stage_file ----------------------------------------------------

@@ -2,17 +2,19 @@
 Dam input preparation helpers.
 
 Fills a dam's input folder (``dams/<dam>/inputs/``) for the HAND pipeline from a dam's
-latitude/longitude:
+latitude/longitude (or a point shapefile, read with ``read_dam_point``):
 
 - ``find_hu4_for_point``: the HU4 that contains the dam (USGS WBD map service)
 - ``nhdplus_hr_urls`` / ``download_nhdplus_hr``: the NHDPlus HR HU4 GDB and raster
   zips from the USGS National Map staged products bucket, extracted into a shared cache
   (default ``nhdplus/`` next to ``dams/``) and referenced from ``inputs/nhdplus.json``
 - ``dam_slug``: folder/file name from a dam label (``"Mountain Dell Dam"`` -> ``mountain_dell``)
+- ``read_dam_point``: lat/lon of the single point in a dam shapefile
 - ``write_dam_point``: ``<name>_dam_location.shp``
 - ``write_stage_file``: ``stage.txt``
 
-Used by ``notebooks/dam_inundation_pipeline.ipynb`` and by ``dam_catchments --dam-lat/--dam-lon``;
+Used by ``notebooks/dam_inundation_pipeline.ipynb`` and by ``dam_catchments --dam-lat/--dam-lon``
+(or ``--dam-shapefile``);
 not a console script itself. The uniform-flow forecast helper, ``write_uniform_forecast``, is in
 ``dam_inundation``.
 """
@@ -278,6 +280,43 @@ def dam_slug(label):
         raise ValueError(f"Cannot make a folder name from dam label {label!r}; "
                          "use letters or digits, or set the name explicitly")
     return slug
+
+
+def read_dam_point(path):
+    """
+    Return (lat, lon), WGS84, of the dam point in a shapefile.
+
+    The file must be a .shp with a coordinate system (.prj) and exactly one feature, a
+    single Point (not MultiPoint, line or polygon).
+
+    Raises:
+        FileNotFoundError: the file does not exist
+        ValueError: not a shapefile, no CRS, not exactly one point, or the point does not
+            convert to valid WGS84 coordinates (usually a wrong .prj)
+    """
+    import geopandas as gpd
+    import math
+
+    path = Path(path).expanduser().resolve()
+    if path.suffix.lower() != ".shp":
+        raise ValueError(f"{path} is not a shapefile (.shp)")
+    if not path.is_file():
+        raise FileNotFoundError(f"Dam shapefile not found: {path}")
+    gdf = gpd.read_file(path)
+    if gdf.crs is None:
+        raise ValueError(f"{path} has no coordinate system; add its .prj file")
+    if len(gdf) != 1:
+        raise ValueError(f"{path} has {len(gdf)} features; it must hold exactly one dam point")
+    geom = gdf.geometry.iloc[0]
+    if geom is None or geom.is_empty or geom.geom_type != "Point":
+        kind = "an empty geometry" if geom is None or geom.is_empty else f"a {geom.geom_type}"
+        raise ValueError(f"{path} holds {kind}; the dam location must be a single Point")
+    point = gdf.to_crs(4326).geometry.iloc[0]
+    lat, lon = point.y, point.x
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError(f"{path}: the point converts to lat {lat}, lon {lon}, which is not a "
+                         f"valid location; check that its .prj ({gdf.crs.name}) matches the coordinates")
+    return lat, lon
 
 
 def write_dam_point(dam_dir, lat, lon, name, tolerance_m=10.0, label=None):

@@ -1,10 +1,11 @@
-"""dam_catchments CLI: preparing dams/<dam>/inputs from --dam-lat/--dam-lon (offline)."""
+"""dam_catchments CLI: preparing dams/<dam>/inputs from --dam-lat/--dam-lon or --dam-shapefile (offline)."""
 
 import json
 import sys
 
 import geopandas as gpd
 import pytest
+from shapely.geometry import Point
 
 import dam_catchments
 import dam_setup
@@ -333,3 +334,89 @@ def test_force_download_needs_coordinates(run_cli, capsys):
         run_cli("--dam-dir", "dams/x", "--force-download")
     assert exc.value.code == 2
     assert "--force-download" in capsys.readouterr().err
+
+
+# --- --dam-shapefile -----------------------------------------------------------------------
+
+def _point_shapefile(path, lat=LAT, lon=LON, crs=32612):
+    """A one-point shapefile, in UTM by default so the copy has to reproject."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gpd.GeoDataFrame({"ID": [1]}, geometry=[Point(lon, lat)], crs=4326).to_crs(crs).to_file(path)
+    return path
+
+
+def test_dam_shapefile_builds_dam_dir_from_scratch(run_cli, tmp_path):
+    _point_shapefile(tmp_path / "survey" / "dam.shp")
+    calc, calls = run_cli("--dam-dir", "dams/new", "--dam-shapefile", "survey/dam.shp",
+                          "--dam-label", "New Dam")
+
+    inputs = tmp_path / "dams" / "new" / "inputs"
+    shp = inputs / "new_dam_location.shp"  # copied, so dam_hand / dam_outlets find it
+    copy = gpd.read_file(shp)
+    assert copy.crs.to_epsg() == 4326 and copy["Dam_Name"].iloc[0] == "New Dam"
+    assert (copy.geometry.iloc[0].y, copy.geometry.iloc[0].x) == pytest.approx((LAT, LON))
+    assert calls["hu4_lookups"] == [pytest.approx((LAT, LON))]
+    assert len(calls["downloads"]) == 2
+    assert (inputs / "stage.txt").exists()
+    assert calc.kwargs["dam_shapefile"] == shp
+    assert calc.kwargs["raster_dir"] == tmp_path / "nhdplus" / RASTER_STEM
+    info = json.loads((tmp_path / "dams" / "new" / "outputs" / "run_info.json").read_text())
+    assert info["hu4"] == HU4 and info["dam_shapefile"] == str(shp)
+
+
+def test_dam_shapefile_in_inputs_is_used_as_is(run_cli, tmp_path):
+    inputs = tmp_path / "dams" / "x" / "inputs"
+    shp = _point_shapefile(inputs / "a_dam_location.shp")
+    _point_shapefile(inputs / "b_dam_location.shp", lat=LAT + 0.05)  # picking one is allowed
+    calc, calls = run_cli("--dam-dir", "dams/x", "--dam-shapefile", "a_dam_location.shp")
+    assert calc.kwargs["dam_shapefile"] == shp
+    assert len(calls["downloads"]) == 2
+    assert sorted(p.name for p in inputs.glob("*.shp")) == ["a_dam_location.shp", "b_dam_location.shp"]
+
+
+def test_dam_shapefile_found_without_flag_does_not_download(run_cli, tmp_path, caplog):
+    _point_shapefile(tmp_path / "dams" / "x" / "inputs" / "dam_location.shp")
+    with pytest.raises(SystemExit) as exc:
+        run_cli("--dam-dir", "dams/x")
+    assert exc.value.code == 1
+    assert "WBDHU12" in caplog.text or ".gdb" in caplog.text  # missing NHDPlus data
+    assert not list((tmp_path / "dams" / "x" / "inputs").glob("nhdplus.json"))
+
+
+def test_dam_shapefile_rerun_needs_no_network(run_cli, monkeypatch, tmp_path):
+    _point_shapefile(tmp_path / "dam.shp")
+    run_cli("--dam-dir", "dams/x", "--dam-shapefile", "./dam.shp")
+
+    def offline(*args):
+        raise AssertionError("network used although the data is in the dam dir")
+
+    monkeypatch.setattr(dam_catchments, "find_hu4_for_point", offline)
+    monkeypatch.setattr(dam_setup, "nhdplus_hr_urls", offline)
+    calc, _ = run_cli("--dam-dir", "dams/x", "--dam-shapefile", "./dam.shp")
+    assert calc.kwargs["dam_shapefile"].name == "x_dam_location.shp"
+
+
+def test_dam_shapefile_far_from_existing_point_fails(run_cli, tmp_path, caplog):
+    run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    _point_shapefile(tmp_path / "moved.shp", lat=LAT + 0.01)
+    with pytest.raises(SystemExit) as exc:
+        run_cli("--dam-dir", "dams/x", "--dam-shapefile", "./moved.shp")
+    assert exc.value.code == 1
+    assert "Delete that shapefile" in caplog.text
+
+
+def test_bad_dam_shapefile_fails_before_creating_anything(run_cli, tmp_path, caplog):
+    gpd.GeoDataFrame({"ID": [1, 2]}, geometry=[Point(LON, LAT), Point(LON, LAT + 0.01)],
+                     crs=4326).to_file(tmp_path / "two.shp")
+    with pytest.raises(SystemExit) as exc:
+        run_cli("--dam-dir", "dams/x", "--dam-shapefile", "./two.shp")
+    assert exc.value.code == 1
+    assert "exactly one dam point" in caplog.text
+    assert not (tmp_path / "dams").exists()
+
+
+def test_dam_shapefile_must_be_shp(run_cli, capsys):
+    with pytest.raises(SystemExit) as exc:
+        run_cli("--dam-dir", "dams/x", "--dam-shapefile", "dam.gpkg")
+    assert exc.value.code == 2
+    assert "must be a shapefile" in capsys.readouterr().err

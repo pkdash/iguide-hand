@@ -12,8 +12,9 @@ This script:
 6. Computes bounding box in reference raster projection
 7. Optionally clips all NHDPlus rasters in a directory to the bounding box
 
-With --dam-lat/--dam-lon it first prepares the dam directory: writes the dam point and a
-default stage.txt (if missing) and downloads the HU4's NHDPlus HR data (see dam_setup.py).
+With --dam-lat/--dam-lon or --dam-shapefile it first prepares the dam directory: writes the
+dam point and a default stage.txt (if missing) and downloads the HU4's NHDPlus HR data (see
+dam_setup.py).
 """
 
 import sys
@@ -28,8 +29,9 @@ import rasterio
 
 from utils import (resolve_user_path, find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir,
                    default_output_dir, default_nhd_cache_dir, dam_inputs_dir, write_run_info,
-                   read_nhdplus_ref, NHDPLUS_REF_FILE)
-from dam_setup import download_nhdplus_hr, find_hu4_for_point, write_dam_point, write_stage_file
+                   read_nhdplus_ref, NHDPLUS_REF_FILE, DAM_SHAPEFILE_NAME, INPUTS_DIR_NAME)
+from dam_setup import (download_nhdplus_hr, find_hu4_for_point, read_dam_point, write_dam_point,
+                       write_stage_file)
 
 # Logger will be configured in main()
 logger = logging.getLogger(__name__)
@@ -663,19 +665,24 @@ def parse_arguments():
     parser.add_argument(
         "--dam-shapefile",
         default=None,
-        help="Dam location shapefile; a bare filename is looked up in <dam-dir>/inputs "
-             "(default: found there)"
+        help="Dam location: a point shapefile with one point and a .prj, in any coordinate "
+             "system; a bare filename is looked up in <dam-dir>/inputs. Like --dam-lat/--dam-lon, "
+             "it prepares <dam-dir>/inputs (see below) and copies the point there as "
+             "<dam-name>_dam_location.shp unless it already is a *dam_location.shp in inputs/ "
+             "(default: the dam_location.shp or single *dam_location.shp in inputs/, without "
+             "preparing anything)"
     )
 
-    # Dam directory setup from coordinates (instead of a hand-made dam folder)
+    # Dam directory setup from coordinates or a point shapefile (instead of a hand-made dam folder)
     setup = parser.add_argument_group(
-        "dam setup from coordinates",
+        "dam setup from coordinates or --dam-shapefile",
         # Raw formatter: wrap by hand
-        "With --dam-lat/--dam-lon, <dam-dir>/inputs is created if needed and filled with what\n"
-        "is missing: <dam-name>_dam_location.shp, a default stage.txt, and the NHDPlus HR GDB\n"
-        "and raster folder of the dam's HU4, downloaded from the USGS National Map into a\n"
-        "shared cache and recorded in inputs/nhdplus.json (the raster zip is 1-6 GB; allow\n"
-        "about 3x that in free disk space). Existing files are kept."
+        "With --dam-lat/--dam-lon or --dam-shapefile, <dam-dir>/inputs is created if needed\n"
+        "and filled with what is missing: <dam-name>_dam_location.shp, a default stage.txt,\n"
+        "and the NHDPlus HR GDB and raster folder of the dam's HU4, downloaded from the USGS\n"
+        "National Map into a shared cache and recorded in inputs/nhdplus.json (the raster zip\n"
+        "is 1-6 GB; allow about 3x that in free disk space). Existing files are kept. A dam\n"
+        "shapefile found in inputs/ without --dam-shapefile never triggers a download."
     )
     setup.add_argument("--dam-lat", type=float, default=None,
                        help="Dam latitude, WGS84 decimal degrees. Best on the channel just below "
@@ -789,6 +796,9 @@ def validate_setup_arguments(parser, args):
             parser.error(f"--dam-lon {args.dam_lon} is outside [-180, 180]")
         if args.dam_shapefile is not None:
             parser.error("--dam-shapefile cannot be combined with --dam-lat/--dam-lon")
+    if args.dam_shapefile is not None and Path(args.dam_shapefile).suffix.lower() != ".shp":
+        parser.error(f"--dam-shapefile must be a shapefile (.shp), got {args.dam_shapefile!r}")
+    if has_lat or args.dam_shapefile is not None:
         if args.dam_name is not None and (not args.dam_name or args.dam_name in (".", "..")
                                           or any(c in args.dam_name for c in "/\\")):
             parser.error(f"--dam-name must be a plain name without path separators, got {args.dam_name!r}")
@@ -797,25 +807,39 @@ def validate_setup_arguments(parser, args):
     elif any(v for v in (args.dam_name, args.dam_label, args.hu4, args.nhd_cache_dir, args.keep_zips,
                               args.force_download)):
         parser.error("--dam-name, --dam-label, --hu4, --nhd-cache-dir, --keep-zips and "
-                     "--force-download need --dam-lat/--dam-lon")
+                     "--force-download need --dam-lat/--dam-lon or --dam-shapefile")
     if args.hu4 is not None and not (args.hu4.isdigit() and len(args.hu4) == 4):
         parser.error(f"--hu4 must be a 4-digit HUC code, got {args.hu4!r}")
 
 
 def prepare_dam_dir(args, dam_dir):
     """
-    Fill <dam_dir>/inputs from --dam-lat/--dam-lon: dam point, default stage.txt (if missing),
-    and the NHDPlus HR products that are neither overridden by --huc12-gdb/--raster-dir nor
-    already available there. Returns the HU4 code if NHDPlus data had to be provided, else None.
-    Raises on failure (handled by main()).
+    Fill <dam_dir>/inputs from --dam-lat/--dam-lon or --dam-shapefile: dam point, default
+    stage.txt (if missing), and the NHDPlus HR products that are neither overridden by
+    --huc12-gdb/--raster-dir nor already available there. Returns (dam shapefile, HU4 code if
+    NHDPlus data had to be provided, else None). Raises on failure (handled by main()).
+
+    A --dam-shapefile point is copied to inputs/<dam-name>_dam_location.shp, so the later
+    stages find it, unless it already is a *dam_location.shp in inputs/; then it is used as is.
 
     Data already available (in inputs/ or through inputs/nhdplus.json) is used without any
     network access, so reruns work offline (unless --force-download). An explicit --hu4 that disagrees with the HU4
     recorded in nhdplus.json is an error.
     """
+    inputs = dam_dir / INPUTS_DIR_NAME
+    dam_shapefile = None
+    if args.dam_lat is not None:
+        lat, lon = args.dam_lat, args.dam_lon
+    else:
+        source = resolve_user_path(args.dam_shapefile, inputs)
+        lat, lon = read_dam_point(source)  # validated before anything is created
+        logger.info(f"Dam point from {source}: lat {lat:.6f}, lon {lon:.6f}")
+        if source.parent == inputs and source.name.endswith(DAM_SHAPEFILE_NAME):
+            dam_shapefile = source
     inputs = dam_inputs_dir(dam_dir, create=True)
-    write_dam_point(inputs, args.dam_lat, args.dam_lon, args.dam_name or dam_dir.name,
-                    label=args.dam_label and args.dam_label.strip())
+    if dam_shapefile is None:
+        dam_shapefile = write_dam_point(inputs, lat, lon, args.dam_name or dam_dir.name,
+                                        label=args.dam_label and args.dam_label.strip())
     write_stage_file(inputs)  # default stages; keeps an existing stage.txt
     recorded = read_nhdplus_ref(inputs).get("hu4")
     if args.hu4 and recorded and str(recorded) != args.hu4:
@@ -835,13 +859,13 @@ def prepare_dam_dir(args, dam_dir):
                 if args.force_download:
                     products.append(key)
     if not products:
-        return None
-    hu4 = args.hu4 or find_hu4_for_point(args.dam_lat, args.dam_lon)
+        return dam_shapefile, None
+    hu4 = args.hu4 or find_hu4_for_point(lat, lon)
     cache_dir = args.nhd_cache_dir or default_nhd_cache_dir(dam_dir)
     logger.info(f"NHDPlus HR cache: {cache_dir}")
     download_nhdplus_hr(hu4, inputs, cache_dir=cache_dir, keep_zips=args.keep_zips,
                         products=products, force=args.force_download)
-    return hu4
+    return dam_shapefile, hu4
 
 
 def setup_logging(verbose=False, quiet=False):
@@ -869,10 +893,10 @@ def main():
 
     # Convert paths to absolute and check if files exist
     dam_dir = Path(args.dam_dir).expanduser().resolve()
-    hu4 = None
-    if args.dam_lat is not None:
+    hu4 = dam_shapefile = None
+    if args.dam_lat is not None or args.dam_shapefile is not None:
         try:
-            hu4 = prepare_dam_dir(args, dam_dir)
+            dam_shapefile, hu4 = prepare_dam_dir(args, dam_dir)
         # Network (URLError, HTTPException), disk, bad zip, bad shapefile, service responses
         except Exception as e:
             logger.error(f"Could not prepare dam directory {dam_dir}: {e}")
@@ -882,8 +906,8 @@ def main():
         sys.exit(1)
     try:
         inputs = dam_inputs_dir(dam_dir)
-        dam_shapefile = (find_dam_shapefile(inputs) if args.dam_shapefile is None
-                         else resolve_user_path(args.dam_shapefile, inputs))
+        if dam_shapefile is None:
+            dam_shapefile = find_dam_shapefile(inputs)
         huc12_gdb = (find_nhdplus_gdb(inputs) if args.huc12_gdb is None
                      else resolve_user_path(args.huc12_gdb, inputs))
         raster_dir = (find_nhdplus_raster_dir(inputs) if args.raster_dir is None

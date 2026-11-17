@@ -164,9 +164,19 @@ Existing files are kept, so you can rerun the same command; once the NHDPlus dat
 
 The other stages need no extra flags; they read `dams/<dam>/inputs/` and `dams/<dam>/outputs/run_info.json`.
 
+#### Quick start: from a dam point shapefile
+
+If the dam location is a point shapefile instead, pass it with `--dam-shapefile` in place of `--dam-lat`/`--dam-lon`; everything else works the same:
+
+```bash
+uv run dam_catchments --dam-dir dams/my_dam --dam-shapefile ~/survey/my_dam_point.shp
+```
+
+The shapefile must hold exactly one point and have a `.prj`; any coordinate system works. `dam_catchments` reads its latitude/longitude, copies the point to `inputs/my_dam_dam_location.shp` (EPSG:4326) so the later stages find it, and then adds `stage.txt` and the NHDPlus HR data as above. A file that already is a `*dam_location.shp` in `inputs/` is used as is (pass its bare name, e.g. `--dam-shapefile dam_location.shp`). Passing `--dam-shapefile` is what turns on the setup: a dam shapefile that `dam_catchments` merely finds in `inputs/` never starts a download.
+
 #### Dam inputs (`dams/<dam>/inputs/`)
 
-- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile` (a bare filename is looked up in `inputs/`).
+- **Dam location**: `dam_location.shp`, a point shapefile. A single `*dam_location.shp` (for example `beach_city_dam_location.shp`) also works, or you can pass `--dam-shapefile` to `dam_catchments` (a bare filename is looked up in `inputs/`; see [the shapefile quick start](#quick-start-from-a-dam-point-shapefile)).
 - **Stage data**: `stage.txt`, the stage heights (m) used to build the rating curves.
 - **Forecast data** (optional): `forecast.csv` with per-reach discharge (`Id, flow_m3s`), keyed to the reach IDs of the current `dam_hand` run. You can supply it later through `dam_inundation --forecast-file`.
 - **Outlet locations** (optional): `Outlets2_utm.shp`, defining the reach outlets. It is not needed when `dam_hand` runs with `--segment-length`.
@@ -225,7 +235,7 @@ On Windows, move the folders in File Explorer. Reach `LINKNO`s change with each 
 
 ## Running in JupyterHub
 
-`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_LABEL`, `DAM_LAT`, `DAM_LON`) and run all cells. `DAM_LABEL` is the dam's name, such as `"Mountain Dell Dam"`. It goes into the dam shapefile and the plot titles, and the dam folder name `dams/<dam>/` is derived from it (`mountain_dell`: lowercase, `_` for spaces and punctuation, a trailing "dam" dropped). Set `DAM_NAME` to choose the folder name yourself. The notebook uses `src/dam_setup.py` to:
+`notebooks/dam_inundation_pipeline.ipynb` runs the whole pipeline, from a dam's latitude/longitude to inundation depth maps, with plots after each stage. Mountain Dell Dam is the worked example. To run another dam, edit the *Parameters* cell (`DAM_LABEL`, `DAM_LAT`, `DAM_LON`, or `DAM_SHAPEFILE` for a one-point shapefile instead of the coordinates) and run all cells. `DAM_LABEL` is the dam's name, such as `"Mountain Dell Dam"`. It goes into the dam shapefile and the plot titles, and the dam folder name `dams/<dam>/` is derived from it (`mountain_dell`: lowercase, `_` for spaces and punctuation, a trailing "dam" dropped). Set `DAM_NAME` to choose the folder name yourself. The notebook uses `src/dam_setup.py` to:
 
 - find the HU4 that contains the dam;
 - download that HU4's NHDPlus HR GDB and raster zips from the USGS National Map bucket (the raster zip is 1–6 GB);
@@ -275,7 +285,7 @@ Only one HU4 is supported. If the river leaves the HU4 before the distance limit
 **Arguments:**
 
 - `--dam-dir` (required): Dam folder, `dams/<dam>`, with `inputs/` and `outputs/` subfolders.
-- `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `<dam-dir>/inputs` (default: found there).
+- `--dam-shapefile`: Dam location, a shapefile with exactly one point and a `.prj`; a bare filename is looked up in `<dam-dir>/inputs`. Like `--dam-lat`/`--dam-lon`, it prepares `inputs/` (see [Quick start](#quick-start-from-a-dam-point-shapefile)) and copies the point there unless it already is a `*dam_location.shp` in `inputs/` (default: `dam_location.shp` or the single `*dam_location.shp` in `inputs/`, without preparing anything).
 - `--huc12-gdb`: NHDPlus HR HU4 geodatabase containing the dam; a bare name is looked up in `<dam-dir>/inputs` (default: found in `inputs/`, else through `inputs/nhdplus.json`).
 - `--raster-dir`: NHDPlus HR HU4 raster directory to clip; a bare name is looked up in `<dam-dir>/inputs` (default: found in `inputs/`, else through `inputs/nhdplus.json`).
 - `--ref-projection-raster`: Reference raster for the target projection (default: `<raster-dir>/hydrodem.tif`).
@@ -285,7 +295,7 @@ Only one HU4 is supported. If the river leaves the HU4 before the distance limit
 - `--clipped-dir`: Subdirectory for clipped rasters within `--output-dir` (default: `clipped`).
 - `--no-clip-rasters`: Only compute the bounding box.
 
-Dam setup from coordinates (see [Quick start](#quick-start-from-the-dams-coordinates)):
+Dam setup from coordinates or `--dam-shapefile` (see [Quick start](#quick-start-from-the-dams-coordinates)):
 
 - `--dam-lat`, `--dam-lon`: Dam location, WGS84 decimal degrees. Given together; they cannot be combined with `--dam-shapefile`.
 - `--dam-name`: Name for `<dam-name>_dam_location.shp` (default: the `--dam-dir` folder name).
@@ -295,14 +305,14 @@ Dam setup from coordinates (see [Quick start](#quick-start-from-the-dams-coordin
 - `--keep-zips`: Keep the downloaded zip files.
 - `--force-download`: Download the NHDPlus HR data again and replace the copy in the cache folder, even if the dam already has it, for example after a damaged or incomplete download. The old copy is replaced only once the new one is extracted, so a failed download keeps it. Products given by `--huc12-gdb`/`--raster-dir` are not touched. It stops with an error if the data sits directly in `inputs/`, because that copy would still be used first; move it away first. Other dams that share the cache folder see the new copy.
 
-`--dam-name`, `--dam-label`, `--hu4`, `--nhd-cache-dir`, `--keep-zips` and `--force-download` need `--dam-lat`/`--dam-lon`.
+`--dam-name`, `--dam-label`, `--hu4`, `--nhd-cache-dir`, `--keep-zips` and `--force-download` need `--dam-lat`/`--dam-lon` or `--dam-shapefile`.
 
 **Outputs:**
 
 - `dams/<dam>/outputs/downstream_huc12s_from_dam.shp`: Shapefile of identified HUC12s.
 - `dams/<dam>/outputs/bounding_box_coordinates.txt`: CRS and coordinate bounds.
 - `dams/<dam>/outputs/processing_report.txt`: Log of the catchment analysis, including the stop reason.
-- `dams/<dam>/outputs/run_info.json`: Input paths used by later stages, plus `hu4` when it was looked up for `--dam-lat`/`--dam-lon`.
+- `dams/<dam>/outputs/run_info.json`: Input paths used by later stages, plus `hu4` when NHDPlus data was downloaded for `--dam-lat`/`--dam-lon` or `--dam-shapefile`.
 - `dams/<dam>/outputs/clipped/`: Directory containing trimmed NHDPlus rasters.
 
 ### 2. HAND Calculation Workflow

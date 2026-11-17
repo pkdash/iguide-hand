@@ -67,6 +67,14 @@ uv run dam_catchments --dam-dir $DAM --dam-lat 40.750594 --dam-lon -111.721088
 
 Put the point on the channel just below the dam embankment: NID coordinates often fall in the reservoir. If `$DAM/inputs` already has a dam shapefile more than 10 m from these coordinates, the command stops with an error; delete that shapefile to use the new point.
 
+If the dam location is a point shapefile instead of coordinates, pass it with `--dam-shapefile`; the setup is the same:
+
+```bash
+uv run dam_catchments --dam-dir $DAM --dam-shapefile path/to/dam_point.shp
+```
+
+The shapefile must hold exactly one point and have a `.prj`; any coordinate system works. The point is copied to `$DAM/inputs/mountain_dell_dam_location.shp`, which the later stages use. A shapefile already in `$DAM/inputs` named `*dam_location.shp` is used as is; pass its bare name (`--dam-shapefile mountain_dell_dam_location.shp`) to download the NHDPlus data for it. Without `--dam-shapefile`, a shapefile found in `$DAM/inputs` never starts a download (that is Option B).
+
 **Option B: from the folder built in step 0.**
 
 ```bash
