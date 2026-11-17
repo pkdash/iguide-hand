@@ -328,7 +328,7 @@ This command will:
 
 **Arguments:**
 
-- `--taudem-path`: Directory containing TauDEM executable binaries.
+- `--taudem-path`: Directory containing TauDEM executable binaries. Optional: if omitted, TauDEM must already be on `PATH` (checked by running `pitremove`); otherwise the script stops and asks for this flag.
 - `--dam-dir` (required): Dam folder, `dams/<dam>`.
 - `--dam-shapefile`: Dam location shapefile; a bare filename is looked up in `<dam-dir>/inputs` (default: found there).
 - `--output-dir`: Directory to save HAND results (default: `dams/<dam>/outputs`).
@@ -407,7 +407,7 @@ This command will:
 
 **Arguments:**
 
-- `--taudem-path`: Directory containing TauDEM executable binaries.
+- `--taudem-path`: Directory containing TauDEM executable binaries. Optional: if omitted, TauDEM must already be on `PATH` (checked by running `pitremove`); otherwise the script stops and asks for this flag.
 - `--dam-dir`: Dam folder; sets the default `--output-dir` to `dams/<dam>/outputs`.
 - `--output-dir`: Directory with the `dam_hand` outputs (default: `dams/<dam>/outputs`; one of `--dam-dir` and `--output-dir` is required). It is also the default location of every file below.
 - `--hand-raster`, `--catch-raster`, `--catchlist`, `--slope-raster`: Inputs from `dam_hand` (defaults `hand.tif`, `w2.tif`, `catchlist.csv`, `slp.tif`).

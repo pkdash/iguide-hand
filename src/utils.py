@@ -282,19 +282,44 @@ def read_run_info(output_dir):
         return {}
 
 
-def setup_taudem_path(taudem_path):
+def check_taudem_on_path():
     """
-    Add TauDEM to system PATH.
-    
-    Args:
-        taudem_path: Path to TauDEM installation
-    """
-    current_path = os.environ.get("PATH", "")
-    if taudem_path not in current_path:
-        os.environ["PATH"] = f"{taudem_path}:{current_path}"
-        logger.info(f"Added TauDEM path: {taudem_path}")
+    Exit with a message unless TauDEM is already on PATH.
 
-    # Check if TauDEM is available
+    Runs ``pitremove`` with no arguments. Only a failure to launch it (the
+    "command not found" case) counts as missing; its usage output or non-zero
+    exit code means TauDEM is available.
+    """
+    try:
+        subprocess.run(["pitremove"], capture_output=True, timeout=30)
+    except FileNotFoundError:
+        logger.error(
+            "TauDEM not found on PATH (`pitremove` could not be run). "
+            "Re-run with --taudem-path <folder containing the TauDEM executables>."
+        )
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        pass  # it launched, so it exists
+    logger.info("TauDEM found on PATH")
+
+
+def setup_taudem_path(taudem_path=None):
+    """
+    Make TauDEM available: add it to PATH, or verify it is already there.
+
+    Args:
+        taudem_path: Folder with the TauDEM executables. If None/empty, TauDEM
+            must already be on PATH (checked by running ``pitremove``).
+    """
+    if taudem_path:
+        current_path = os.environ.get("PATH", "")
+        if taudem_path not in current_path.split(os.pathsep):
+            os.environ["PATH"] = f"{taudem_path}{os.pathsep}{current_path}"
+            logger.info(f"Added TauDEM path: {taudem_path}")
+    else:
+        check_taudem_on_path()
+
+    # Check if MPI is available
     mpiexec_path = shutil.which("mpiexec")
     if mpiexec_path is None:
         logger.warning("mpiexec not found in PATH. TauDEM commands may fail.")

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 class HandDamWorkflow:
     """Main class for HAND dam workflow processing."""
 
-    def __init__(self, dam_dir, taudem_path="$HOME/taudem", output_dir=None,
+    def __init__(self, dam_dir, taudem_path=None, output_dir=None,
                  clipped_dir=None, outlets_on_reaches="Outlets2_utm.shp", segment_length=None,
                  min_segment_length=None, confluence_ratio=None, min_slope=1e-5,
                  max_distance=None, waterbody_path=None,
@@ -47,7 +47,7 @@ class HandDamWorkflow:
         Args:
             dam_dir: Dam folder (e.g. dams/<dam>); its inputs/ subfolder holds the dam location
                 shapefile, stage.txt, and optionally forecast.csv and the outlets shapefile
-            taudem_path: Path to TauDEM installation
+            taudem_path: Folder with the TauDEM executables; None = already on PATH
             output_dir: Output directory for results (default: <dam_dir>/outputs)
             clipped_dir: Directory containing clipped rasters (default: <output_dir>/clipped,
                 where dam_catchments writes them)
@@ -78,7 +78,7 @@ class HandDamWorkflow:
                 depends on it, so keep it fixed for forecasts keyed to reach IDs
             manning_n: Manning's n written for every reach in catchlist.csv
         """
-        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve() if taudem_path else None
         self.dam_dir = Path(dam_dir).expanduser().resolve()
         if not self.dam_dir.is_dir():
             raise FileNotFoundError(f"Dam directory not found: {self.dam_dir}")
@@ -129,7 +129,7 @@ class HandDamWorkflow:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Set up TauDEM PATH
-        setup_taudem_path(str(self.taudem_path))
+        setup_taudem_path(str(self.taudem_path) if self.taudem_path else None)
 
     def run_taudem_command(self, command, description="TauDEM command"):
         """
@@ -788,8 +788,8 @@ def main():
 
     parser.add_argument(
         "--taudem-path",
-        default="$HOME/taudem",
-        help="Path to TauDEM installation (default: $HOME/taudem)"
+        default=None,
+        help="Folder with the TauDEM executables. If omitted, TauDEM must already be on PATH."
     )
 
     parser.add_argument(

@@ -90,7 +90,7 @@ class DamHydroProp:
 
     def __init__(
         self,
-        taudem_path="$HOME/taudem",
+        taudem_path=None,
         output_dir="outputs",
         hand_raster=None,
         catch_raster=None,
@@ -104,7 +104,7 @@ class DamHydroProp:
         Initialize the hydraulic properties computation.
 
         Args:
-            taudem_path: Path to TauDEM installation
+            taudem_path: Folder with the TauDEM executables; None = already on PATH
             output_dir: Directory containing HAND workflow outputs; also the
                 working directory and the default location of every file below
             hand_raster: HAND raster (default: <output_dir>/hand.tif)
@@ -115,7 +115,7 @@ class DamHydroProp:
             hydroprop_file: Output table (default: <output_dir>/hydroprop.csv)
             np: Number of MPI processes
         """
-        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve() if taudem_path else None
         self.output_dir = Path(output_dir).resolve()
 
         def _resolve(path, default_name):
@@ -130,7 +130,7 @@ class DamHydroProp:
         self.np = np
 
         # Set up TauDEM PATH
-        setup_taudem_path(str(self.taudem_path))
+        setup_taudem_path(str(self.taudem_path) if self.taudem_path else None)
 
         # Verify required input files exist
         self.verify_inputs()
@@ -247,8 +247,8 @@ def main():
 
     parser.add_argument(
         "--taudem-path",
-        default="$HOME/taudem",
-        help="Path to TauDEM installation (default: $HOME/taudem)"
+        default=None,
+        help="Folder with the TauDEM executables. If omitted, TauDEM must already be on PATH."
     )
     parser.add_argument(
         "--dam-dir",
