@@ -66,8 +66,16 @@ If you just want to use the iGuide HAND workflow tools, you can install them usi
 
 1. **Install uv** (if not already installed):
 
+   macOS / Linux:
+
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+   Windows (PowerShell):
+
+   ```powershell
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
    ```
 
 2. **Create a new project and install iguide-hand**:
@@ -307,12 +315,22 @@ uv run dam_hand \
   --dam-dir dams/mountain_dell
 ```
 
+On Windows, TauDEM is normally already on `PATH`, so leave out `--taudem-path` (PowerShell):
+
+```powershell
+uv run dam_hand --dam-dir dams\mountain_dell
+```
+
 `dam_hand` reads clipped rasters from `dams/<dam>/outputs/clipped` and writes to `dams/<dam>/outputs`. It reads the dam shapefile, `stage.txt`, `forecast.csv` and the outlets shapefile directly from `dams/<dam>/inputs/` (no subfolders).
 
 To generate 2 km reach outlets instead of using `Outlets2_utm.shp`:
 
 ```bash
 uv run dam_hand --taudem-path /usr/local/bin --dam-dir dams/mountain_dell --segment-length 2000
+```
+
+```powershell
+uv run dam_hand --dam-dir dams\mountain_dell --segment-length 2000   # Windows
 ```
 
 For all options, run `uv run dam_hand --help`.
@@ -397,6 +415,10 @@ uv run dam_hydroprop \
   --dam-dir dams/mountain_dell
 ```
 
+```powershell
+uv run dam_hydroprop --dam-dir dams\mountain_dell   # Windows, TauDEM on PATH
+```
+
 `--dam-dir` only picks the default `--output-dir` (`dams/<dam>/outputs`). Every file flag defaults to a path inside `--output-dir`. Run `uv run dam_hydroprop --help` to see them all.
 
 This command will:
@@ -432,10 +454,19 @@ uv run dam_inundation \
   --depth-table dams/mountain_dell/outputs/depths_peak.csv
 ```
 
+```powershell
+# Windows, TauDEM on PATH
+uv run dam_inundation --dam-dir dams\mountain_dell --forecast-file dams\mountain_dell\inputs\forecast.csv --inundation-raster dams\mountain_dell\outputs\inundepth_peak.tif --depth-table dams\mountain_dell\outputs\depths_peak.csv
+```
+
 Without a forecast, map the same flow on every reach:
 
 ```bash
 uv run dam_inundation --taudem-path /usr/local/bin --dam-dir dams/mountain_dell --uniform-flow 4000
+```
+
+```powershell
+uv run dam_inundation --dam-dir dams\mountain_dell --uniform-flow 4000   # Windows
 ```
 
 This writes `dams/<dam>/outputs/forecast_uniform4000.csv` from `catchlist.csv` and maps it.

@@ -40,6 +40,14 @@ OUT=$DAM/outputs              # default output folder: <dam folder>/outputs
 TAUDEM=~/taudem
 ```
 
+**Windows (PowerShell):** TauDEM is normally on `PATH`, so skip `--taudem-path $TAUDEM` in every command below. Set `$DAM = "dams\mountain_dell"` and `$OUT = "$DAM\outputs"`, and use `$DAM`/`$OUT` where the bash examples use `$DAM`/`$OUT`. Each command goes on one line, for example:
+
+```powershell
+uv run dam_hand --dam-dir $DAM --segment-length 2000
+uv run dam_hydroprop --dam-dir $DAM
+uv run dam_inundation --dam-dir $DAM --uniform-flow 4000
+```
+
 Every stage writes to `$OUT` by default, so the commands below don't pass `--output-dir`. If you want a different folder (for example `$DAM/outputs_demo`), set `OUT` to it and add `--output-dir $OUT` to every command.
 
 ## 1. Downstream catchments and clipped rasters
