@@ -260,6 +260,23 @@ def test_rerun_with_data_present_needs_no_network(run_cli, monkeypatch):
     assert calc.kwargs["raster_dir"].name == RASTER_STEM
 
 
+def test_partial_rerun_reuses_recorded_hu4_without_network(run_cli, monkeypatch, tmp_path):
+    run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    ref = tmp_path / "dams" / "x" / "inputs" / "nhdplus.json"
+    info = json.loads(ref.read_text())
+    del info["raster_dir"]  # as if the first run failed before linking the raster
+    ref.write_text(json.dumps(info))
+
+    def offline(*args):
+        raise AssertionError("network used although the HU4 is recorded and the raster is cached")
+
+    monkeypatch.setattr(dam_catchments, "find_hu4_for_point", offline)
+    monkeypatch.setattr(dam_setup, "nhdplus_hr_urls", offline)
+    calc, _ = run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    assert calc.kwargs["raster_dir"].name == RASTER_STEM
+    assert "raster_dir" in json.loads(ref.read_text())  # link restored from the cache
+
+
 def test_hu4_recorded_only_when_downloaded(run_cli, tmp_path):
     run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
     info = tmp_path / "dams" / "x" / "outputs" / "run_info.json"

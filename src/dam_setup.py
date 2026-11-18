@@ -23,7 +23,9 @@ import json
 import logging
 import re
 import shutil
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -44,11 +46,27 @@ NHDPLUS_HR_PRODUCTS = {"gdb": "GDB", "raster": "Raster"}
 DEFAULT_STAGES = [0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35, 40]
 
 HTTP_TIMEOUT = 120  # seconds
+RETRYABLE_HTTP_CODES = (502, 503, 504)  # transient gateway/server errors
+
+
+def _urlopen_with_retry(url, attempts=3, delay=5.0):
+    """
+    urllib.request.urlopen, retrying transient HTTP errors: the USGS services occasionally
+    answer a good request with 502/503/504.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return urllib.request.urlopen(url, timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            if e.code not in RETRYABLE_HTTP_CODES or attempt == attempts:
+                raise
+            logger.warning(f"HTTP {e.code} from {url} (attempt {attempt}/{attempts}); retrying")
+            time.sleep(delay)
 
 
 def _get_json(url, params):
     full_url = f"{url}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(full_url, timeout=HTTP_TIMEOUT) as response:
+    with _urlopen_with_retry(full_url) as response:
         return json.load(response)
 
 
@@ -85,7 +103,7 @@ def nhdplus_hr_urls(hu4):
     for key, folder in NHDPLUS_HR_PRODUCTS.items():
         prefix = f"{NHDPLUS_HR_PREFIX}/{folder}/NHDPLUS_H_{hu4}_HU4"
         listing_url = f"{TNM_BUCKET_URL}/?{urllib.parse.urlencode({'list-type': 2, 'prefix': prefix})}"
-        with urllib.request.urlopen(listing_url, timeout=HTTP_TIMEOUT) as response:
+        with _urlopen_with_retry(listing_url) as response:
             xml = response.read().decode()
         zips = [(k, int(s)) for k, s in
                 re.findall(r"<Key>([^<]+\.zip)</Key>.*?<Size>(\d+)</Size>", xml, re.S)]
@@ -144,7 +162,24 @@ def _extract(zip_path, target_dir):
         nested.rmdir()
     if target_dir.exists():  # only reached when replacing (--force-download), after a good extraction
         shutil.rmtree(target_dir)
-    partial.rename(target_dir)
+    _rename_with_retry(partial, target_dir)
+
+
+def _rename_with_retry(src, dst, attempts=5, delay=2.0):
+    """
+    src.rename(dst), retrying on transient Windows locks (WinError 5): antivirus and the
+    search indexer briefly hold a handle on freshly extracted files.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            src.rename(dst)
+            return
+        except PermissionError:
+            if attempt == attempts:
+                raise
+            logger.warning(f"Rename {src.name} -> {dst.name} blocked "
+                           f"(attempt {attempt}/{attempts}); retrying")
+            time.sleep(delay)
 
 
 def _release_key(folder):

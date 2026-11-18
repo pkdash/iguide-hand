@@ -823,8 +823,9 @@ def prepare_dam_dir(args, dam_dir):
     stages find it, unless it already is a *dam_location.shp in inputs/; then it is used as is.
 
     Data already available (in inputs/ or through inputs/nhdplus.json) is used without any
-    network access, so reruns work offline (unless --force-download). An explicit --hu4 that disagrees with the HU4
-    recorded in nhdplus.json is an error.
+    network access, so reruns work offline (unless --force-download); a HU4 recorded in
+    nhdplus.json is reused instead of querying the WBD service again. An explicit --hu4
+    that disagrees with the HU4 recorded in nhdplus.json is an error.
     """
     inputs = dam_dir / INPUTS_DIR_NAME
     dam_shapefile = None
@@ -860,7 +861,7 @@ def prepare_dam_dir(args, dam_dir):
                     products.append(key)
     if not products:
         return dam_shapefile, None
-    hu4 = args.hu4 or find_hu4_for_point(lat, lon)
+    hu4 = args.hu4 or recorded or find_hu4_for_point(lat, lon)
     cache_dir = args.nhd_cache_dir or default_nhd_cache_dir(dam_dir)
     logger.info(f"NHDPlus HR cache: {cache_dir}")
     download_nhdplus_hr(hu4, inputs, cache_dir=cache_dir, keep_zips=args.keep_zips,

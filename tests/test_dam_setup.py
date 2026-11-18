@@ -3,6 +3,7 @@
 import io
 import json
 import shutil
+import urllib.error
 import zipfile
 
 import geopandas as gpd
@@ -81,6 +82,32 @@ def test_nhdplus_hr_urls_missing_product(monkeypatch):
         dam_setup.nhdplus_hr_urls("0101")
 
 
+def test_get_json_retries_transient_gateway_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(url, 504, "Gateway Time-out", None, None)
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {"a": 1}) == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_get_json_does_not_retry_client_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+
+    def bad(url, timeout=None):
+        raise urllib.error.HTTPError(url, 400, "Bad Request", None, None)
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", bad)
+    with pytest.raises(urllib.error.HTTPError):
+        dam_setup._get_json("http://x", {})
+
+
 # --- _extract ------------------------------------------------------------------------------
 
 def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
@@ -102,6 +129,41 @@ def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
     assert not (target / "__MACOSX").exists()
     assert not (target / "leftover").exists()
     assert not stale.exists()
+
+
+def test_extract_retries_rename_blocked_by_transient_lock(tmp_path, monkeypatch):
+    zip_path = tmp_path / "X_RASTER.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("hydrodem.tif", b"tif")
+    target = tmp_path / "X_RASTER"
+
+    real_rename = dam_setup.Path.rename
+    state = {"failures": 2}
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+
+    def flaky_rename(self, dst):
+        if state["failures"] and self.suffix == ".partial":
+            state["failures"] -= 1
+            raise PermissionError(5, "Access is denied")  # WinError 5
+        return real_rename(self, dst)
+
+    monkeypatch.setattr(dam_setup.Path, "rename", flaky_rename)
+
+    dam_setup._extract(zip_path, target)
+
+    assert (target / "hydrodem.tif").read_bytes() == b"tif"
+    assert state["failures"] == 0
+
+
+def test_extract_gives_up_when_rename_stays_blocked(tmp_path, monkeypatch):
+    src = tmp_path / "X_RASTER.partial"
+    src.mkdir()
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    monkeypatch.setattr(dam_setup.Path, "rename",
+                        lambda self, dst: (_ for _ in ()).throw(PermissionError(5, "Access is denied")))
+
+    with pytest.raises(PermissionError):
+        dam_setup._rename_with_retry(src, tmp_path / "X_RASTER", attempts=3)
 
 
 # --- download_nhdplus_hr -----------------------------------------------------------------
