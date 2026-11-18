@@ -437,3 +437,47 @@ def test_dam_shapefile_must_be_shp(run_cli, capsys):
         run_cli("--dam-dir", "dams/x", "--dam-shapefile", "dam.gpkg")
     assert exc.value.code == 2
     assert "must be a shapefile" in capsys.readouterr().err
+
+
+def _set_recorded_hu4(tmp_path, value):
+    ref = tmp_path / "dams" / "x" / "inputs" / "nhdplus.json"
+    info = json.loads(ref.read_text())
+    info["hu4"] = value
+    del info["raster_dir"]  # force a product to be provided, so the HU4 is needed
+    ref.write_text(json.dumps(info))
+    return ref
+
+
+@pytest.mark.parametrize("bad", [9999, "999", "99x9", None])
+def test_malformed_recorded_hu4_is_looked_up_again(run_cli, tmp_path, caplog, bad):
+    run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    ref = _set_recorded_hu4(tmp_path, bad)
+    _, calls = run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    assert len(calls["hu4_lookups"]) == 2  # looked up again instead of trusting the bad value
+    if bad is not None:
+        assert "not a 4-digit HUC code" in caplog.text
+    assert json.loads(ref.read_text())["hu4"] == HU4  # repaired
+
+
+def test_force_download_does_not_reuse_recorded_hu4(run_cli, tmp_path, caplog):
+    run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    ref = tmp_path / "dams" / "x" / "inputs" / "nhdplus.json"
+    info = json.loads(ref.read_text())
+    info["hu4"] = "1234"  # wrong HU4 recorded by an earlier run
+    ref.write_text(json.dumps(info))
+    _, calls = run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON, "--force-download")
+    assert len(calls["hu4_lookups"]) == 2
+    assert calls["url_lookups"][-1] == HU4
+    assert json.loads(ref.read_text())["hu4"] == HU4
+
+
+def test_force_download_allows_hu4_that_differs_from_recorded(run_cli, tmp_path):
+    run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON)
+    ref = tmp_path / "dams" / "x" / "inputs" / "nhdplus.json"
+    info = json.loads(ref.read_text())
+    info["hu4"] = "1234"
+    ref.write_text(json.dumps(info))
+    _, calls = run_cli("--dam-dir", "dams/x", "--dam-lat", LAT, "--dam-lon", LON,
+                       "--hu4", HU4, "--force-download")
+    assert len(calls["hu4_lookups"]) == 1  # --hu4 used, no lookup
+    assert json.loads(ref.read_text())["hu4"] == HU4
