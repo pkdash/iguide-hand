@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 RUN_INFO_FILE = "run_info.json"
 DAM_SHAPEFILE_NAME = "dam_location.shp"
 
+# Per-dam layout: <dams>/<dam>/inputs and <dams>/<dam>/outputs, with the NHDPlus HR
+# downloads shared in <dams>/../nhdplus and referenced from inputs/nhdplus.json
+INPUTS_DIR_NAME = "inputs"
+OUTPUTS_DIR_NAME = "outputs"
+NHD_CACHE_DIR_NAME = "nhdplus"
+DAMS_DIR_NAME = "dams"
+NHDPLUS_REF_FILE = "nhdplus.json"
+_NHDPLUS_REF_KEYS = {"gdb": "gdb", "raster": "raster_dir"}
+
 
 def resolve_user_path(value, dam_dir):
     """
@@ -76,11 +85,97 @@ def _one_match(matches, what, dam_dir, flag):
                             f"{[str(m.relative_to(dam_dir)) for m in matches]}; pass {flag}")
 
 
+def _load_nhdplus_ref_json(ref_path):
+    """
+    The dict in nhdplus.json, or None (with a warning naming the file) if it cannot be
+    read, is not a JSON object, or has "gdb"/"raster_dir" values that are not strings.
+    """
+    try:
+        ref = json.loads(ref_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"Could not read {ref_path}: {e}")
+        return None
+    if not isinstance(ref, dict):
+        logger.warning(f"Ignoring {ref_path}: expected a JSON object, got {type(ref).__name__}")
+        return None
+    bad = [k for k in _NHDPLUS_REF_KEYS.values()
+           if ref.get(k) is not None and not isinstance(ref[k], str)]
+    if bad:
+        logger.warning(f"Ignoring {ref_path}: {', '.join(bad)} must be a path string")
+        return None
+    return ref
+
+
+def read_nhdplus_ref(inputs_dir):
+    """
+    Return the dict in <inputs_dir>/nhdplus.json with "gdb" / "raster_dir" resolved to
+    absolute Paths (relative paths are relative to inputs_dir), or {} if absent or unreadable.
+    """
+    inputs_dir = Path(inputs_dir).expanduser().resolve()
+    ref_path = inputs_dir / NHDPLUS_REF_FILE
+    if not ref_path.exists():
+        return {}
+    ref = _load_nhdplus_ref_json(ref_path)
+    if ref is None:
+        return {}
+    for key in _NHDPLUS_REF_KEYS.values():
+        if ref.get(key):
+            ref[key] = (inputs_dir / Path(ref[key]).expanduser()).resolve()
+    return ref
+
+
+def write_nhdplus_ref(inputs_dir, hu4=None, gdb=None, raster_dir=None):
+    """
+    Merge NHDPlus HR locations into <inputs_dir>/nhdplus.json, so a dam can use a shared
+    download without copying it or creating symlinks (which need extra rights on Windows).
+    Paths are stored relative to inputs_dir, so the whole tree can be moved; absolute when
+    no relative path exists (another drive on Windows).
+    """
+    inputs_dir = Path(inputs_dir).expanduser().resolve()
+    ref_path = inputs_dir / NHDPLUS_REF_FILE
+    ref = {}
+    if ref_path.exists():
+        ref = _load_nhdplus_ref_json(ref_path)
+        if ref is None:  # keep what the user wrote before replacing it
+            backup = ref_path.with_name(ref_path.name + ".bak")
+            shutil.copy2(ref_path, backup)
+            logger.warning(f"Saved the unusable {ref_path} as {backup}")
+            ref = {}
+    if hu4 is not None:
+        ref["hu4"] = str(hu4)
+    for key, path in (("gdb", gdb), ("raster_dir", raster_dir)):
+        if path is None:
+            continue
+        path = Path(path).expanduser().resolve()
+        try:
+            ref[key] = Path(os.path.relpath(path, inputs_dir)).as_posix()
+        except ValueError:  # different drive on Windows
+            ref[key] = str(path)
+    ref_path.write_text(json.dumps(ref, indent=2) + "\n")
+    logger.info(f"Wrote NHDPlus HR reference: {ref_path}")
+
+
+def _from_nhdplus_ref(dam_dir, product, error):
+    """
+    The product's path from <dam_dir>/nhdplus.json; re-raises error if the file does not
+    name it, FileNotFoundError naming the file if the path it names is gone.
+    """
+    path = read_nhdplus_ref(dam_dir).get(_NHDPLUS_REF_KEYS[product])
+    if path is None:
+        raise error
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{dam_dir / NHDPLUS_REF_FILE} points to {path}, which does not exist; fix or "
+            "delete that file, or rerun dam_catchments with --dam-lat/--dam-lon to restore the data")
+    return path
+
+
 def find_nhdplus_gdb(dam_dir):
     """
     Locate the dam's NHDPlus HR HU4 geodatabase: the single *.gdb with a WBDHU12 layer,
     directly in dam_dir or one folder down (e.g. NHDPLUS_H_1602_HU4_GDB/NHDPLUS_H_1602_HU4_GDB.gdb).
     Other geodatabases, such as elev_source.gdb in the raster folder, are skipped.
+    If there is none, the "gdb" entry of <dam_dir>/nhdplus.json is used.
     """
     import geopandas as gpd
 
@@ -93,21 +188,77 @@ def find_nhdplus_gdb(dam_dir):
                     matches.append(p)
             except Exception as e:  # unreadable GDB: not the one we want
                 logger.debug(f"Skipping {p}: {e}")
-    return _one_match(matches, "NHDPlus HR geodatabase (*.gdb with a WBDHU12 layer)",
-                      dam_dir, "--huc12-gdb")
+    try:
+        return _one_match(matches, "NHDPlus HR geodatabase (*.gdb with a WBDHU12 layer)",
+                          dam_dir, "--huc12-gdb")
+    except FileNotFoundError as e:
+        if matches:
+            raise
+        return _from_nhdplus_ref(dam_dir, "gdb", e)
 
 
 def find_nhdplus_raster_dir(dam_dir):
-    """Locate the dam's NHDPlus HR HU4 raster folder: the single subfolder holding hydrodem.tif."""
+    """
+    Locate the dam's NHDPlus HR HU4 raster folder: the single subfolder holding hydrodem.tif,
+    else the "raster_dir" entry of <dam_dir>/nhdplus.json.
+    """
     dam_dir = Path(dam_dir).expanduser().resolve()
     matches = [p.parent for p in dam_dir.glob("*/hydrodem.tif")]
-    return _one_match(matches, "NHDPlus HR raster folder (with hydrodem.tif)", dam_dir,
-                      "--raster-dir")
+    try:
+        return _one_match(matches, "NHDPlus HR raster folder (with hydrodem.tif)", dam_dir,
+                          "--raster-dir")
+    except FileNotFoundError as e:
+        if matches:
+            raise
+        return _from_nhdplus_ref(dam_dir, "raster", e)
+
+
+def dam_inputs_dir(dam_dir, create=False):
+    """
+    The input folder of a dam folder: <dam_dir>/inputs.
+
+    Args:
+        dam_dir: the dam folder, e.g. dams/mountain_dell (not its inputs/ subfolder)
+        create: create the folder (with its parents) if it is missing
+
+    Raises:
+        FileNotFoundError: the folder is missing (and create is False), dam_dir is itself
+            an inputs/ folder
+    """
+    dam_dir = Path(dam_dir).expanduser().resolve()
+    inputs = dam_dir / INPUTS_DIR_NAME
+    if inputs.is_dir():
+        return inputs
+    if dam_dir.name == INPUTS_DIR_NAME:
+        raise FileNotFoundError(
+            f"{dam_dir} looks like a dam's {INPUTS_DIR_NAME}/ folder; pass the dam folder "
+            f"above it ({dam_dir.parent}) as --dam-dir")
+    if create:
+        inputs.mkdir(parents=True, exist_ok=True)
+        return inputs
+    raise FileNotFoundError(
+        f"No {INPUTS_DIR_NAME}/ folder in {dam_dir}; put the dam inputs in {inputs}, or pass "
+        "--dam-lat/--dam-lon to dam_catchments to create it")
 
 
 def default_output_dir(dam_dir):
-    """Default per-dam output directory: outputs/<dam_dir name>."""
-    return (Path("outputs") / Path(dam_dir).expanduser().resolve().name).resolve()
+    """Default per-dam output directory: <dam_dir>/outputs (independent of the CWD)."""
+    return Path(dam_dir).expanduser().resolve() / OUTPUTS_DIR_NAME
+
+
+def default_nhd_cache_dir(dam_dir):
+    """
+    Default NHDPlus HR download folder.
+
+    For the standard layout (<root>/dams/<dam>) this is the shared <root>/nhdplus, so dams in
+    one HU4 download it once. For a dam folder anywhere else we cannot know what the
+    grandparent is, so the cache goes inside the dam folder (<dam_dir>/nhdplus) instead of
+    possibly outside the project. Pass --nhd-cache-dir to share a cache explicitly.
+    """
+    dam_dir = Path(dam_dir).expanduser().resolve()
+    if dam_dir.parent.name == DAMS_DIR_NAME:
+        return dam_dir.parent.parent / NHD_CACHE_DIR_NAME
+    return dam_dir / NHD_CACHE_DIR_NAME
 
 
 def write_run_info(output_dir, **paths):
@@ -131,19 +282,44 @@ def read_run_info(output_dir):
         return {}
 
 
-def setup_taudem_path(taudem_path):
+def check_taudem_on_path():
     """
-    Add TauDEM to system PATH.
-    
-    Args:
-        taudem_path: Path to TauDEM installation
-    """
-    current_path = os.environ.get("PATH", "")
-    if taudem_path not in current_path:
-        os.environ["PATH"] = f"{taudem_path}:{current_path}"
-        logger.info(f"Added TauDEM path: {taudem_path}")
+    Exit with a message unless TauDEM is already on PATH.
 
-    # Check if TauDEM is available
+    Runs ``pitremove`` with no arguments. Only a failure to launch it (the
+    "command not found" case) counts as missing; its usage output or non-zero
+    exit code means TauDEM is available.
+    """
+    try:
+        subprocess.run(["pitremove"], capture_output=True, timeout=30)
+    except FileNotFoundError:
+        logger.error(
+            "TauDEM not found on PATH (`pitremove` could not be run). "
+            "Re-run with --taudem-path <folder containing the TauDEM executables>."
+        )
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        pass  # it launched, so it exists
+    logger.info("TauDEM found on PATH")
+
+
+def setup_taudem_path(taudem_path=None):
+    """
+    Make TauDEM available: add it to PATH, or verify it is already there.
+
+    Args:
+        taudem_path: Folder with the TauDEM executables. If None/empty, TauDEM
+            must already be on PATH (checked by running ``pitremove``).
+    """
+    if taudem_path:
+        current_path = os.environ.get("PATH", "")
+        if taudem_path not in current_path.split(os.pathsep):
+            os.environ["PATH"] = f"{taudem_path}{os.pathsep}{current_path}"
+            logger.info(f"Added TauDEM path: {taudem_path}")
+    else:
+        check_taudem_on_path()
+
+    # Check if MPI is available
     mpiexec_path = shutil.which("mpiexec")
     if mpiexec_path is None:
         logger.warning("mpiexec not found in PATH. TauDEM commands may fail.")

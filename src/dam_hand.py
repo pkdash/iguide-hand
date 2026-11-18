@@ -19,7 +19,7 @@ from pathlib import Path
 import rasterio
 from rasterio.features import rasterize
 from utils import (resolve_user_path, setup_taudem_path, run_taudem_command, find_dam_shapefile,
-                   find_nhdplus_gdb, default_output_dir, read_run_info)
+                   find_nhdplus_gdb, default_output_dir, dam_inputs_dir, read_run_info)
 from generate_segment_outlets import (SegmentOutletGenerator, default_waterbody_path,
                                       STOP_WATERBODY_FTYPES)
 
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 class HandDamWorkflow:
     """Main class for HAND dam workflow processing."""
 
-    def __init__(self, dam_dir, taudem_path="$HOME/taudem", output_dir=None,
+    def __init__(self, dam_dir, taudem_path=None, output_dir=None,
                  clipped_dir=None, outlets_on_reaches="Outlets2_utm.shp", segment_length=None,
                  min_segment_length=None, confluence_ratio=None, min_slope=1e-5,
                  max_distance=None, waterbody_path=None,
@@ -45,13 +45,13 @@ class HandDamWorkflow:
         Initialize the workflow.
 
         Args:
-            dam_dir: Per-dam input directory (dam location shapefile, stage.txt, and
-                optionally forecast.csv and the outlets shapefile)
-            taudem_path: Path to TauDEM installation
-            output_dir: Output directory for results (default: outputs/<dam_dir name>)
+            dam_dir: Dam folder (e.g. dams/<dam>); its inputs/ subfolder holds the dam location
+                shapefile, stage.txt, and optionally forecast.csv and the outlets shapefile
+            taudem_path: Folder with the TauDEM executables; None = already on PATH
+            output_dir: Output directory for results (default: <dam_dir>/outputs)
             clipped_dir: Directory containing clipped rasters (default: <output_dir>/clipped,
                 where dam_catchments writes them)
-            outlets_on_reaches: Name of user-supplied outlets shapefile in dam_dir
+            outlets_on_reaches: Name of user-supplied outlets shapefile in <dam_dir>/inputs
                 (ignored when segment_length is set)
             segment_length: If set, generate outlets every this many meters along the dam's
                 main stem instead of using outlets_on_reaches
@@ -65,11 +65,11 @@ class HandDamWorkflow:
             waterbody_path: With segment_length, NHDPlus HR GDB whose NHDWaterbody layer ends the
                 main stem just upstream of the first large lake/reservoir. Default (None):
                 the huc12_gdb dam_catchments recorded in <output_dir>/run_info.json, else the
-                NHDPlus HR GDB in dam_dir; with neither, there is no waterbody stop. An explicit
+                NHDPlus HR GDB in <dam_dir>/inputs; with neither, there is no waterbody stop. An explicit
                 path must exist.
             min_waterbody_area_km2: Smallest lake/reservoir (km2) that ends the main stem
             dam_shapefile: Dam location shapefile. Default (None): dam_location.shp, or the
-                single *dam_location.shp, in dam_dir
+                single *dam_location.shp, in <dam_dir>/inputs
             stream_threshold: Contributing-area threshold (cells) for the stream grid
             move_outlet_distance: Max cells moveoutletstostreams moves the reach outlets
             dam_move_distance: Max cells moveoutletstostreams moves the dam point down its
@@ -78,17 +78,18 @@ class HandDamWorkflow:
                 depends on it, so keep it fixed for forecasts keyed to reach IDs
             manning_n: Manning's n written for every reach in catchlist.csv
         """
-        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve()
+        self.taudem_path = Path(os.path.expandvars(taudem_path)).expanduser().resolve() if taudem_path else None
         self.dam_dir = Path(dam_dir).expanduser().resolve()
         if not self.dam_dir.is_dir():
             raise FileNotFoundError(f"Dam directory not found: {self.dam_dir}")
+        self.inputs_dir = dam_inputs_dir(self.dam_dir)
         self.output_dir = (default_output_dir(self.dam_dir) if output_dir is None
                            else Path(output_dir).expanduser().resolve())
         self.clipped_dir = (self.output_dir / "clipped" if clipped_dir is None
                             else Path(clipped_dir).expanduser().resolve())
         self.outlets_on_reaches = outlets_on_reaches
-        self.dam_shapefile = (find_dam_shapefile(self.dam_dir) if dam_shapefile is None
-                              else resolve_user_path(dam_shapefile, self.dam_dir))
+        self.dam_shapefile = (find_dam_shapefile(self.inputs_dir) if dam_shapefile is None
+                              else resolve_user_path(dam_shapefile, self.inputs_dir))
         self.stream_threshold = stream_threshold
         self.move_outlet_distance = move_outlet_distance
         self.dam_move_distance = dam_move_distance
@@ -107,7 +108,7 @@ class HandDamWorkflow:
             self.waterbody_path = default_waterbody_path(self.output_dir)
             if self.waterbody_path is None:
                 try:
-                    self.waterbody_path = find_nhdplus_gdb(self.dam_dir)
+                    self.waterbody_path = find_nhdplus_gdb(self.inputs_dir)
                 except FileNotFoundError:
                     pass  # no waterbody stop; SegmentOutletGenerator warns
         self.min_waterbody_area_km2 = min_waterbody_area_km2
@@ -117,6 +118,7 @@ class HandDamWorkflow:
             raise FileNotFoundError(f"Waterbody file not found: {self.waterbody_path}")
 
         logger.info(f"Dam directory: {self.dam_dir}")
+        logger.info(f"Input directory: {self.inputs_dir}")
         logger.info(f"Dam shapefile: {self.dam_shapefile}")
         logger.info(f"Output directory: {self.output_dir}")
         if not read_run_info(self.output_dir):
@@ -127,7 +129,7 @@ class HandDamWorkflow:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Set up TauDEM PATH
-        setup_taudem_path(str(self.taudem_path))
+        setup_taudem_path(str(self.taudem_path) if self.taudem_path else None)
 
     def run_taudem_command(self, command, description="TauDEM command"):
         """
@@ -154,11 +156,11 @@ class HandDamWorkflow:
             logger.info(f"Copied {tif_file.name}")
 
     def copy_input_files(self):
-        """Copy required input files from data directory."""
+        """Copy required input files from the dam's inputs directory."""
         logger.info("Copying input files...")
 
         # stage.txt is required (input to dam_hydroprop)
-        src_file = self.dam_dir / "stage.txt"
+        src_file = self.inputs_dir / "stage.txt"
         if not src_file.exists():
             logger.error(f"Required input file not found: {src_file}")
             sys.exit(1)
@@ -170,13 +172,13 @@ class HandDamWorkflow:
         # (Id, flow_m3s) if you have one that matches, or generate one (e.g. a
         # uniform-flow forecast) after dam_hand. Either way it can be passed to
         # dam_inundation directly via --forecast-file.
-        src_file = self.dam_dir / "forecast.csv"
+        src_file = self.inputs_dir / "forecast.csv"
         if src_file.exists():
             shutil.copy2(src_file, self.output_dir / "forecast.csv")
             logger.info("Copied forecast.csv")
         else:
             logger.info(
-                f"No forecast.csv in {self.dam_dir}; pass your own (or a generated) forecast "
+                f"No forecast.csv in {self.inputs_dir}; pass your own (or a generated) forecast "
                 "matching this run's reach IDs to dam_inundation via --forecast-file"
             )
 
@@ -286,11 +288,11 @@ class HandDamWorkflow:
         logger.info(f"Created projected dam location: {output_shp}")
 
     def copy_outlets_on_reaches(self):
-        """Copy user-supplied Outlets2_utm.shp from dam directory to outputs directory."""
+        """Copy user-supplied Outlets2_utm.shp from the inputs directory to the output directory."""
         logger.info(f"Copying user-supplied outlets file: {self.outlets_on_reaches}")
 
-        # Source file in dam directory
-        source_shp = self.dam_dir / self.outlets_on_reaches
+        # Source file in the dam's inputs directory
+        source_shp = self.inputs_dir / self.outlets_on_reaches
 
         # Check if source file exists
         if not source_shp.exists():
@@ -786,29 +788,31 @@ def main():
 
     parser.add_argument(
         "--taudem-path",
-        default="$HOME/taudem",
-        help="Path to TauDEM installation (default: $HOME/taudem)"
+        default=None,
+        help="Folder with the TauDEM executables. If omitted, TauDEM must already be on PATH."
     )
 
     parser.add_argument(
         "--dam-dir",
         required=True,
-        help="Per-dam input directory, e.g. data/<dam>, holding the dam location shapefile, "
-             "stage.txt, and optionally forecast.csv and the outlets shapefile"
+        help="Dam folder, e.g. dams/<dam>. Its inputs/ subfolder holds the dam location "
+             "shapefile, stage.txt, and optionally forecast.csv and the outlets shapefile"
     )
 
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Output directory for results (default: outputs/<dam-dir name>)"
+        help="Output directory for results (default: <dam-dir>/outputs). A relative path "
+             "is relative to the current directory, not --dam-dir. Using anything but the "
+             "default means passing the same --output-dir to every later stage"
     )
 
     parser.add_argument(
         "--dam-shapefile",
         default=None,
-        help="Dam location shapefile; a bare filename is looked up in --dam-dir "
+        help="Dam location shapefile; a bare filename is looked up in <dam-dir>/inputs "
              "(default: dam_location.shp, or the single "
-             "*dam_location.shp, in --dam-dir)"
+             "*dam_location.shp, in <dam-dir>/inputs)"
     )
 
     parser.add_argument(
@@ -820,7 +824,7 @@ def main():
     parser.add_argument(
         "--outlets-on-reaches",
         default="Outlets2_utm.shp",
-        help="Name of user-supplied outlets shapefile in --dam-dir (default: Outlets2_utm.shp). "
+        help="Name of user-supplied outlets shapefile in <dam-dir>/inputs (default: Outlets2_utm.shp). "
              "Ignored when --segment-length is set"
     )
 
@@ -860,7 +864,7 @@ def main():
         default=None,
         help="With --segment-length, NHDPlus HR GDB whose NHDWaterbody layer ends the main stem "
              "just upstream of the first large lake/reservoir (default: the --huc12-gdb that "
-             "dam_catchments recorded in <output-dir>/run_info.json, else the GDB in --dam-dir; "
+             "dam_catchments recorded in <output-dir>/run_info.json, else the GDB in <dam-dir>/inputs; "
              "skipped with a warning if "
              "unavailable; an explicit path must exist; ignored with --max-distance)"
     )

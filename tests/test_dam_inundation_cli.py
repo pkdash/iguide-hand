@@ -7,6 +7,8 @@ import pytest
 
 import dam_inundation
 
+RealAnalysis = dam_inundation.DamInundationAnalysis  # before run_cli patches it
+
 
 class FakeAnalysis:
     instances = []
@@ -83,13 +85,52 @@ def test_uniform_flow_without_catchlist_fails_cleanly(run_cli, tmp_path, caplog)
     assert "uniform-flow forecast" in caplog.text
 
 
-def test_forecast_file_bare_name_is_looked_up_in_dam_dir(run_cli, tmp_path, out_dir):
-    dam_dir = tmp_path / "data" / "x"
-    dam_dir.mkdir(parents=True)
-    analysis = run_cli("--dam-dir", dam_dir, "--output-dir", out_dir,
+def test_forecast_file_bare_name_is_looked_up_in_dam_inputs(run_cli, monkeypatch, tmp_path, out_dir):
+    analysis = run_cli("--dam-dir", "dams/x", "--output-dir", out_dir,
                        "--forecast-file", "forecast.csv")
     assert analysis.kwargs["forecast_file"] == "forecast.csv"
-    assert analysis.kwargs["dam_dir"] == str(dam_dir)
+    assert analysis.kwargs["dam_dir"] == "dams/x"
+    (tmp_path / "dams" / "x" / "inputs").mkdir(parents=True)
+    real = real_analysis(monkeypatch, output_dir=out_dir, forecast_file="forecast.csv", dam_dir="dams/x")
+    assert real.forecast_file == tmp_path / "dams" / "x" / "inputs" / "forecast.csv"
+
+
+def real_analysis(monkeypatch, **kwargs):
+    monkeypatch.setattr(dam_inundation, "setup_taudem_path", lambda path: None)
+    monkeypatch.setattr(RealAnalysis, "verify_inputs", lambda self: None)
+    return RealAnalysis(**kwargs)
+
+
+def test_bare_forecast_name_needs_the_dam_inputs_folder(monkeypatch, tmp_path, out_dir):
+    with pytest.raises(FileNotFoundError, match="No inputs/ folder"):
+        real_analysis(monkeypatch, output_dir=out_dir, forecast_file="forecast.csv",
+                      dam_dir=tmp_path / "dams" / "x")
+
+
+def test_bare_forecast_name_with_inputs_folder_as_dam_dir(monkeypatch, tmp_path, out_dir):
+    inputs = tmp_path / "dams" / "x" / "inputs"
+    inputs.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="pass the dam folder"):
+        real_analysis(monkeypatch, output_dir=out_dir, forecast_file="forecast.csv", dam_dir=inputs)
+
+
+def test_explicit_forecast_path_skips_the_layout_check(monkeypatch, tmp_path, out_dir):
+    forecast = out_dir / "forecast_uniform4000.csv"  # as --uniform-flow writes it
+    real = real_analysis(monkeypatch, output_dir=out_dir, forecast_file=forecast,
+                         dam_dir=tmp_path / "dams" / "x")  # no inputs/ folder
+    assert real.forecast_file == forecast
+
+
+def test_default_output_dir_is_inside_dam_dir(run_cli, tmp_path):
+    analysis = run_cli("--dam-dir", "dams/x", "--forecast-file", "./f.csv")
+    assert analysis.kwargs["output_dir"] == tmp_path / "dams" / "x" / "outputs"
+
+
+def test_dam_dir_or_output_dir_is_required(run_cli, capsys):
+    with pytest.raises(SystemExit) as exc:
+        run_cli("--forecast-file", "./f.csv")
+    assert exc.value.code == 2
+    assert "pass --dam-dir" in capsys.readouterr().err
 
 
 # --- write_uniform_forecast ------------------------------------------------------------------

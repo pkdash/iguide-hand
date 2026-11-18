@@ -1,32 +1,39 @@
 """
 Dam input preparation helpers.
 
-Builds a self-contained per-dam folder (``data/<dam>/``) for the HAND pipeline from
-a dam's latitude/longitude:
+Fills a dam's input folder (``dams/<dam>/inputs/``) for the HAND pipeline from a dam's
+latitude/longitude (or a point shapefile, read with ``read_dam_point``):
 
 - ``find_hu4_for_point``: the HU4 that contains the dam (USGS WBD map service)
 - ``nhdplus_hr_urls`` / ``download_nhdplus_hr``: the NHDPlus HR HU4 GDB and raster
-  zips from the USGS National Map staged products bucket
+  zips from the USGS National Map staged products bucket, extracted into a shared cache
+  (default ``nhdplus/`` next to ``dams/``) and referenced from ``inputs/nhdplus.json``
 - ``dam_slug``: folder/file name from a dam label (``"Mountain Dell Dam"`` -> ``mountain_dell``)
+- ``read_dam_point``: lat/lon of the single point in a dam shapefile
 - ``write_dam_point``: ``<name>_dam_location.shp``
 - ``write_stage_file``: ``stage.txt``
 
-Used by ``notebooks/dam_inundation_pipeline.ipynb`` and by ``dam_catchments --dam-lat/--dam-lon``;
+Used by ``notebooks/dam_inundation_pipeline.ipynb`` and by ``dam_catchments --dam-lat/--dam-lon``
+(or ``--dam-shapefile``);
 not a console script itself. The uniform-flow forecast helper, ``write_uniform_forecast``, is in
 ``dam_inundation``.
 """
 
 import json
 import logging
+import os
 import re
 import shutil
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from utils import DAM_SHAPEFILE_NAME, find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir
+from utils import (DAM_SHAPEFILE_NAME, find_dam_shapefile, find_nhdplus_gdb, find_nhdplus_raster_dir,
+                   write_nhdplus_ref)
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +47,49 @@ NHDPLUS_HR_PRODUCTS = {"gdb": "GDB", "raster": "Raster"}
 DEFAULT_STAGES = [0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35, 40]
 
 HTTP_TIMEOUT = 120  # seconds
+RETRYABLE_HTTP_CODES = (502, 503, 504)  # transient gateway/server errors
+
+# Retry file operations blocked by a transient lock only on Windows, where antivirus and the
+# search indexer briefly open new files and block renaming/deleting them. Elsewhere a
+# PermissionError is a real permission problem, so it is raised at once.
+RETRY_FILE_LOCKS = os.name == "nt"
+# WinError 5 (access denied), 32 (sharing violation), 145 (directory not empty: a scanner
+# still has a file open inside a folder being removed)
+_LOCK_WINERRORS = (5, 32, 145)
+
+
+def _with_network_retry(fetch, url, attempts=3, delay=5.0):
+    """
+    Return fetch(), retrying transient network failures: HTTP 502/503/504 (the USGS services
+    occasionally answer a good request with these), timeouts, dropped/reset connections
+    and other URLErrors. Other HTTP errors (e.g. 404) are raised at once.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch()
+        except urllib.error.HTTPError as e:  # before URLError: HTTPError is a subclass
+            if e.code not in RETRYABLE_HTTP_CODES or attempt == attempts:
+                raise
+            e.close()  # release the error response's connection before retrying
+            reason = f"HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == attempts:
+                raise
+            reason = f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+        logger.warning(f"{reason} from {url} (attempt {attempt}/{attempts}); retrying in {delay:.0f} s")
+        time.sleep(delay)
+
+
+def _read_url(url):
+    """The body of url, retrying transient failures of both the request and the read."""
+    def fetch():
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
+            return response.read()
+    return _with_network_retry(fetch, url)
 
 
 def _get_json(url, params):
-    full_url = f"{url}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(full_url, timeout=HTTP_TIMEOUT) as response:
-        return json.load(response)
+    return json.loads(_read_url(f"{url}?{urllib.parse.urlencode(params)}"))
 
 
 def find_hu4_for_point(lat, lon):
@@ -81,8 +125,7 @@ def nhdplus_hr_urls(hu4):
     for key, folder in NHDPLUS_HR_PRODUCTS.items():
         prefix = f"{NHDPLUS_HR_PREFIX}/{folder}/NHDPLUS_H_{hu4}_HU4"
         listing_url = f"{TNM_BUCKET_URL}/?{urllib.parse.urlencode({'list-type': 2, 'prefix': prefix})}"
-        with urllib.request.urlopen(listing_url, timeout=HTTP_TIMEOUT) as response:
-            xml = response.read().decode()
+        xml = _read_url(listing_url).decode()
         zips = [(k, int(s)) for k, s in
                 re.findall(r"<Key>([^<]+\.zip)</Key>.*?<Size>(\d+)</Size>", xml, re.S)]
         if not zips:
@@ -97,7 +140,9 @@ def _download(url, dest, size=None):
     dest = Path(dest)
     tmp = dest.with_suffix(dest.suffix + ".part")
     logger.info(f"Downloading {url} ({size / 1e9:.2f} GB)" if size else f"Downloading {url}")
-    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response, open(tmp, "wb") as out:
+    # Only opening the request is retried; a failure mid-stream needs a rerun.
+    response = _with_network_retry(lambda: urllib.request.urlopen(url, timeout=HTTP_TIMEOUT), url)
+    with response, open(tmp, "wb") as out:
         total = size or int(response.headers.get("Content-Length", 0))
         done, next_report = 0, 0.05
         while chunk := response.read(1 << 20):
@@ -109,7 +154,8 @@ def _download(url, dest, size=None):
     if total and done != total:
         tmp.unlink()
         raise OSError(f"Download of {url} stopped at {done} of {total} bytes; rerun to retry")
-    tmp.rename(dest)
+    # antivirus usually opens a large new file to scan it, blocking the rename on Windows
+    _retry_on_lock(lambda: tmp.rename(dest), f"Renaming {tmp.name} to {dest.name}")
     return dest
 
 
@@ -127,7 +173,7 @@ def _extract(zip_path, target_dir):
     partial = target_dir.with_name(target_dir.name + ".partial")
     if partial.exists():
         logger.info(f"Removing incomplete extraction {partial}")
-        shutil.rmtree(partial)
+        _retry_on_lock(lambda: shutil.rmtree(partial), f"Removing {partial.name}")
     partial.mkdir(parents=True)
     logger.info(f"Extracting {zip_path.name} to {target_dir}")
     with zipfile.ZipFile(zip_path) as z:
@@ -136,27 +182,101 @@ def _extract(zip_path, target_dir):
     nested = partial / target_dir.name
     if nested.is_dir():
         for item in nested.iterdir():
-            shutil.move(str(item), partial / item.name)
-        nested.rmdir()
-    partial.rename(target_dir)
+            _retry_on_lock(lambda item=item: shutil.move(str(item), partial / item.name),
+                           f"Moving {item.name} out of {nested.name}")
+        _retry_on_lock(nested.rmdir, f"Removing {nested.name}")
+    if target_dir.exists():  # only reached when replacing (--force-download), after a good extraction
+        _retry_on_lock(lambda: shutil.rmtree(target_dir), f"Removing the old {target_dir.name}")
+    _retry_on_lock(lambda: partial.rename(target_dir), f"Renaming {partial.name} to {target_dir.name}")
 
 
-def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False, products=("gdb", "raster")):
+def _is_transient_lock(error):
+    return isinstance(error, PermissionError) or getattr(error, "winerror", None) in _LOCK_WINERRORS
+
+
+def _retry_on_lock(action, description, attempts=6, delay=1.0):
     """
-    Make the HU4's NHDPlus HR GDB and raster folder available in dam_dir.
+    Return action(), retrying on Windows while a file is locked: antivirus and the search
+    indexer briefly open freshly downloaded or extracted files, which blocks renaming and
+    deleting them (WinError 5/32). Waits double each time (1, 2, 4, 8, 16 s: about 30 s in
+    all). Elsewhere (RETRY_FILE_LOCKS false) the action runs once and any error is raised.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except OSError as e:
+            if not (RETRY_FILE_LOCKS and _is_transient_lock(e)) or attempt == attempts:
+                raise
+            wait = delay * 2 ** (attempt - 1)
+            logger.warning(f"{description} was blocked, probably by antivirus or the search "
+                           f"indexer scanning it (attempt {attempt}/{attempts}); "
+                           f"retrying in {wait:.0f} s")
+            time.sleep(wait)
 
-    Does nothing if dam_dir already has them. Otherwise each product is downloaded
-    and extracted to <cache_dir>/<zip name>/ (skipped if that folder exists already),
-    then symlinked into dam_dir when cache_dir differs from dam_dir. Use a shared
-    cache_dir (e.g. data/) for several dams in the same HU4.
+
+def _remove_zip(zip_path):
+    """
+    Delete a zip after extraction. The data is already extracted, so a zip that stays
+    locked is only reported, not an error.
+    """
+    try:
+        _retry_on_lock(zip_path.unlink, f"Deleting {zip_path.name}")
+    except OSError as e:
+        logger.warning(f"Could not delete {zip_path} ({e}); the data is extracted, "
+                       "so you can delete it by hand")
+
+
+def _release_key(folder):
+    """Sort key for cached product folders: a dated release (HU4_<yyyymmdd>_) beats an undated one."""
+    m = re.search(r"_HU4_(\d{8})_", folder.name)
+    return (m is not None, m.group(1) if m else "", folder.name)
+
+
+def _cached_product(cache_dir, hu4, key):
+    """
+    The latest extracted <cache_dir>/NHDPLUS_H_<hu4>_HU4*_<GDB|RASTER> folder (by the release
+    date in its name), or None. Logs the choice when several releases are cached.
+    """
+    suffix = {"gdb": "GDB", "raster": "RASTER"}[key]
+    found = sorted((p for p in cache_dir.glob(f"NHDPLUS_H_{hu4}_HU4*_{suffix}") if p.is_dir()),
+                   key=_release_key)
+    if len(found) > 1:
+        logger.info(f"Using {found[-1].name} of the cached releases "
+                    f"{', '.join(p.name for p in found)}")
+    return found[-1] if found else None
+
+
+def _product_path(extracted, key):
+    """The GDB (or raster folder) inside an extracted NHDPlus HR product folder."""
+    if key == "gdb":
+        return find_nhdplus_gdb(extracted)
+    if not (extracted / "hydrodem.tif").exists():
+        raise FileNotFoundError(f"No hydrodem.tif in {extracted}")
+    return extracted
+
+
+def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False, products=("gdb", "raster"),
+                        force=False):
+    """
+    Make the HU4's NHDPlus HR GDB and raster folder available to a dam.
+
+    Does nothing if dam_dir (the dam's inputs folder) already has them, either directly or
+    through its nhdplus.json. Otherwise each product is extracted to <cache_dir>/<zip name>/
+    (downloaded unless that folder exists already). When cache_dir differs from dam_dir,
+    the location is recorded in <dam_dir>/nhdplus.json rather than symlinked, since symlinks
+    need extra rights on Windows. Use a shared cache_dir for several dams in the same HU4.
 
     Args:
         hu4: 4-digit HUC code
-        dam_dir: per-dam input directory
+        dam_dir: the dam's input folder (dams/<dam>/inputs)
         cache_dir: where to keep extracted NHDPlus data (default: dam_dir)
         keep_zips: keep the downloaded zip files after extraction
         products: which of "gdb" and "raster" to provide (e.g. only "raster" when the
             GDB is supplied from elsewhere)
+        force: download the products again and replace the extracted folders in cache_dir,
+            ignoring what is already there. The old folder is replaced only after the new
+            extraction succeeded. Raises FileNotFoundError if a product sits directly in
+            dam_dir outside cache_dir (the finders would keep preferring it); remove it first.
 
     Returns:
         (gdb_path, raster_dir) as found by the utils.py finders; None for a product
@@ -175,36 +295,58 @@ def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False, products=
     missing = []
     for key, finder in finders.items():
         try:
-            logger.info(f"NHDPlus HR {key} already in dam folder: {finder(dam_dir)}")
+            found = finder(dam_dir)
         except FileNotFoundError:
             missing.append(key)
-    if missing:
-        urls = nhdplus_hr_urls(hu4)
-        for key in missing:
+            continue
+        if not force:
+            logger.info(f"NHDPlus HR {key} already in dam folder: {found}")
+        elif found.is_relative_to(dam_dir) and not found.is_relative_to(cache_dir):
+            raise FileNotFoundError(
+                f"--force-download: the NHDPlus HR {key} {found} is in {dam_dir} itself, which "
+                "is searched before the downloaded copy; move or delete it first")
+        else:
+            missing.append(key)
+    urls = None
+    for key in missing:
+        extracted = None if force else _cached_product(cache_dir, hu4, key)
+        if extracted is not None:
+            logger.info(f"Using cached {extracted}")
+            try:
+                _product_path(extracted, key)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"{e}; the cached folder is incomplete. Rerun with --force-download "
+                    "to download it again (or delete the folder)") from e
+        else:
+            if urls is None:
+                urls = nhdplus_hr_urls(hu4)
             url, size = urls[key]
             zip_name = url.rsplit("/", 1)[-1]
             extracted = cache_dir / Path(zip_name).stem
-            if extracted.is_dir():
-                logger.info(f"Using cached {extracted}")
-            else:
-                free = shutil.disk_usage(cache_dir).free
-                if free < 3 * size:  # zip + extracted contents
-                    logger.warning(f"Only {free / 1e9:.1f} GB free in {cache_dir}; "
-                                   f"{zip_name} needs about {3 * size / 1e9:.1f} GB")
-                zip_path = cache_dir / zip_name
-                if not zip_path.exists():
-                    _download(url, zip_path, size)
-                try:
-                    _extract(zip_path, extracted)
-                except zipfile.BadZipFile:
-                    zip_path.unlink()  # corrupt: download again next time
-                    raise
-                if not keep_zips:
-                    zip_path.unlink()
-            link = dam_dir / extracted.name
-            if extracted != link and not link.exists():
-                link.symlink_to(extracted, target_is_directory=True)
-                logger.info(f"Linked {link} -> {extracted}")
+            free = shutil.disk_usage(cache_dir).free
+            if free < 3 * size:  # zip + extracted contents
+                logger.warning(f"Only {free / 1e9:.1f} GB free in {cache_dir}; "
+                               f"{zip_name} needs about {3 * size / 1e9:.1f} GB")
+            zip_path = cache_dir / zip_name
+            if force:  # a kept zip may be the stale copy
+                _retry_on_lock(lambda: zip_path.unlink(missing_ok=True), f"Deleting {zip_path.name}")
+            if not zip_path.exists():
+                _download(url, zip_path, size)
+            try:
+                _extract(zip_path, extracted)
+            except zipfile.BadZipFile:
+                try:  # corrupt: download again next time
+                    _retry_on_lock(zip_path.unlink, f"Deleting the corrupt {zip_path.name}")
+                except OSError as e:
+                    logger.error(f"Could not delete the corrupt {zip_path} ({e}); delete it "
+                                 "before rerunning, or it will be extracted again")
+                raise
+            if not keep_zips:
+                _remove_zip(zip_path)
+        if cache_dir != dam_dir:
+            path = _product_path(extracted, key)
+            write_nhdplus_ref(dam_dir, hu4=hu4, **{"gdb" if key == "gdb" else "raster_dir": path})
     return tuple(finders[k](dam_dir) if k in finders else None for k in ("gdb", "raster"))
 
 
@@ -221,6 +363,43 @@ def dam_slug(label):
         raise ValueError(f"Cannot make a folder name from dam label {label!r}; "
                          "use letters or digits, or set the name explicitly")
     return slug
+
+
+def read_dam_point(path):
+    """
+    Return (lat, lon), WGS84, of the dam point in a shapefile.
+
+    The file must be a .shp with a coordinate system (.prj) and exactly one feature, a
+    single Point (not MultiPoint, line or polygon).
+
+    Raises:
+        FileNotFoundError: the file does not exist
+        ValueError: not a shapefile, no CRS, not exactly one point, or the point does not
+            convert to valid WGS84 coordinates (usually a wrong .prj)
+    """
+    import geopandas as gpd
+    import math
+
+    path = Path(path).expanduser().resolve()
+    if path.suffix.lower() != ".shp":
+        raise ValueError(f"{path} is not a shapefile (.shp)")
+    if not path.is_file():
+        raise FileNotFoundError(f"Dam shapefile not found: {path}")
+    gdf = gpd.read_file(path)
+    if gdf.crs is None:
+        raise ValueError(f"{path} has no coordinate system; add its .prj file")
+    if len(gdf) != 1:
+        raise ValueError(f"{path} has {len(gdf)} features; it must hold exactly one dam point")
+    geom = gdf.geometry.iloc[0]
+    if geom is None or geom.is_empty or geom.geom_type != "Point":
+        kind = "an empty geometry" if geom is None or geom.is_empty else f"a {geom.geom_type}"
+        raise ValueError(f"{path} holds {kind}; the dam location must be a single Point")
+    point = gdf.to_crs(4326).geometry.iloc[0]
+    lat, lon = point.y, point.x
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError(f"{path}: the point converts to lat {lat}, lon {lon}, which is not a "
+                         f"valid location; check that its .prj ({gdf.crs.name}) matches the coordinates")
+    return lat, lon
 
 
 def write_dam_point(dam_dir, lat, lon, name, tolerance_m=10.0, label=None):

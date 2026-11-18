@@ -1,4 +1,7 @@
 .DS_Store
+/dams
+/nhdplus
+# Pre-dams/ layout; kept so folders not yet migrated stay out of git
 /data
 /outputs*
 __pycache__

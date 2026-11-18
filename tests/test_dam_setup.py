@@ -1,12 +1,17 @@
 """Offline tests for dam_setup.py (dam folder preparation used by the notebook and the CLI)."""
 
 import io
+import json
+import shutil
+import urllib.error
 import zipfile
 
 import geopandas as gpd
 import pytest
+from shapely.geometry import LineString, MultiPoint, Point
 
 import dam_setup
+import utils
 from conftest import GDB_STEM, HU4, LAT, LON, RASTER_STEM
 from utils import find_dam_shapefile
 
@@ -77,6 +82,112 @@ def test_nhdplus_hr_urls_missing_product(monkeypatch):
         dam_setup.nhdplus_hr_urls("0101")
 
 
+def test_get_json_retries_transient_gateway_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(url, 504, "Gateway Time-out", None, None)
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {"a": 1}) == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_get_json_does_not_retry_client_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+
+    def bad(url, timeout=None):
+        raise urllib.error.HTTPError(url, 400, "Bad Request", None, None)
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", bad)
+    with pytest.raises(urllib.error.HTTPError):
+        dam_setup._get_json("http://x", {})
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionResetError(54, "reset"),
+                                   urllib.error.URLError("temporary failure")])
+def test_get_json_retries_timeouts_and_dropped_connections(monkeypatch, error):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise error
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {}) == {"ok": True}
+    assert calls["n"] == 2
+
+
+def test_get_json_retries_a_timeout_while_reading(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    class SlowBody(io.BytesIO):
+        def read(self, *args):
+            raise TimeoutError("read timed out")
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        return SlowBody() if calls["n"] == 1 else io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {}) == {"ok": True}
+
+
+def test_get_json_gives_up_after_three_timeouts(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def down(url, timeout=None):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", down)
+    with pytest.raises(TimeoutError):
+        dam_setup._get_json("http://x", {})
+    assert calls["n"] == 3
+
+
+def test_retried_http_error_is_closed(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    errors = []
+
+    def flaky(url, timeout=None):
+        if not errors:
+            errors.append(urllib.error.HTTPError(url, 503, "Unavailable", None, io.BytesIO(b"x")))
+            raise errors[0]
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    dam_setup._get_json("http://x", {})
+    assert errors[0].fp is None or errors[0].fp.closed
+
+
+def test_download_retries_a_gateway_error_on_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    real_urlopen = dam_setup.urllib.request.urlopen
+    src = tmp_path / "src.zip"
+    src.write_bytes(b"zipdata")
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(url, 503, "Slow Down", None, None)
+        return real_urlopen(url, timeout=timeout)
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._download(src.as_uri(), tmp_path / "out.zip").read_bytes() == b"zipdata"
+    assert calls["n"] == 2
+
+
 # --- _extract ------------------------------------------------------------------------------
 
 def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
@@ -100,6 +211,121 @@ def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
     assert not stale.exists()
 
 
+@pytest.fixture
+def windows_locks(monkeypatch):
+    """Turn on the Windows-only lock retries, with no real waiting."""
+    monkeypatch.setattr(dam_setup, "RETRY_FILE_LOCKS", True)
+    sleeps = []
+    monkeypatch.setattr(dam_setup.time, "sleep", sleeps.append)
+    return sleeps
+
+
+def _locked(times):
+    """An action raising a WinError-5-like PermissionError the first `times` calls."""
+    state = {"calls": 0}
+
+    def action():
+        state["calls"] += 1
+        if state["calls"] <= times:
+            raise PermissionError(5, "Access is denied")
+        return "done"
+    return action, state
+
+
+def test_retry_on_lock_retries_on_windows_with_growing_waits(windows_locks):
+    action, state = _locked(3)
+    assert dam_setup._retry_on_lock(action, "Renaming x") == "done"
+    assert state["calls"] == 4
+    assert windows_locks == [1, 2, 4]
+
+
+def test_retry_on_lock_gives_up_after_the_last_attempt(windows_locks):
+    action, state = _locked(99)
+    with pytest.raises(PermissionError):
+        dam_setup._retry_on_lock(action, "Renaming x", attempts=3)
+    assert state["calls"] == 3
+
+
+def test_retry_on_lock_does_not_retry_off_windows(monkeypatch):
+    monkeypatch.setattr(dam_setup, "RETRY_FILE_LOCKS", False)
+    monkeypatch.setattr(dam_setup.time, "sleep",
+                        lambda _: (_ for _ in ()).throw(AssertionError("waited off Windows")))
+    action, state = _locked(1)
+    with pytest.raises(PermissionError):
+        dam_setup._retry_on_lock(action, "Renaming x")
+    assert state["calls"] == 1  # a real permission problem fails at once, as before
+
+
+def test_retry_on_lock_does_not_retry_other_errors(windows_locks):
+    def missing():
+        raise FileNotFoundError("gone")
+    with pytest.raises(FileNotFoundError):
+        dam_setup._retry_on_lock(missing, "Renaming x")
+    assert windows_locks == []
+
+
+def test_extract_retries_rename_blocked_by_transient_lock(tmp_path, monkeypatch, windows_locks):
+    zip_path = tmp_path / "X_RASTER.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("hydrodem.tif", b"tif")
+    target = tmp_path / "X_RASTER"
+
+    real_rename = dam_setup.Path.rename
+    state = {"failures": 2}
+
+    def flaky_rename(self, dst):
+        if state["failures"] and self.suffix == ".partial":
+            state["failures"] -= 1
+            raise PermissionError(5, "Access is denied")  # WinError 5
+        return real_rename(self, dst)
+
+    monkeypatch.setattr(dam_setup.Path, "rename", flaky_rename)
+
+    dam_setup._extract(zip_path, target)
+
+    assert (target / "hydrodem.tif").read_bytes() == b"tif"
+    assert state["failures"] == 0
+
+
+def test_extract_retries_removing_a_locked_stale_partial(tmp_path, monkeypatch, windows_locks):
+    zip_path = tmp_path / "X_RASTER.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("hydrodem.tif", b"tif")
+    stale = tmp_path / "X_RASTER.partial"
+    stale.mkdir()
+    real_rmtree = dam_setup.shutil.rmtree
+    state = {"failures": 1}
+
+    def flaky_rmtree(path, *args, **kwargs):
+        if state["failures"]:
+            state["failures"] -= 1
+            raise PermissionError(32, "The process cannot access the file")  # WinError 32
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(dam_setup.shutil, "rmtree", flaky_rmtree)
+    dam_setup._extract(zip_path, tmp_path / "X_RASTER")
+    assert (tmp_path / "X_RASTER" / "hydrodem.tif").exists()
+    assert state["failures"] == 0
+
+
+def test_download_retries_rename_of_part_file(tmp_path, monkeypatch, windows_locks):
+    src = tmp_path / "src.zip"
+    src.write_bytes(b"zipdata")
+    real_rename = dam_setup.Path.rename
+    state = {"failures": 2}
+
+    def flaky_rename(self, dst):
+        if state["failures"] and self.suffix == ".part":
+            state["failures"] -= 1
+            raise PermissionError(5, "Access is denied")
+        return real_rename(self, dst)
+
+    monkeypatch.setattr(dam_setup.Path, "rename", flaky_rename)
+    dest = dam_setup._download(src.as_uri(), tmp_path / "out.zip")
+    assert dest.read_bytes() == b"zipdata"
+    assert not (tmp_path / "out.zip.part").exists()
+
+
 # --- download_nhdplus_hr -----------------------------------------------------------------
 
 def test_download_into_dam_dir_and_reuse(tmp_path, offline_tnm):
@@ -119,19 +345,142 @@ def test_download_into_dam_dir_and_reuse(tmp_path, offline_tnm):
     assert offline_tnm["url_lookups"] == [HU4]
 
 
-def test_download_into_shared_cache_links_dam_dirs(tmp_path, offline_tnm):
+def test_download_into_shared_cache_is_referenced_not_linked(tmp_path, offline_tnm):
     cache = tmp_path / "cache"
     dam_a, dam_b = tmp_path / "a", tmp_path / "b"
     dam_setup.download_nhdplus_hr(HU4, dam_a, cache_dir=cache, keep_zips=True)
     gdb_b, raster_b = dam_setup.download_nhdplus_hr(HU4, dam_b, cache_dir=cache)
 
     assert len(offline_tnm["downloads"]) == 2  # second dam reused the cache
+    assert offline_tnm["url_lookups"] == [HU4]  # ... without even listing the bucket
     assert (cache / f"{RASTER_STEM}.zip").exists()  # keep_zips
     for dam in (dam_a, dam_b):
-        assert (dam / RASTER_STEM).is_symlink()
-        assert (dam / RASTER_STEM).resolve() == (cache / RASTER_STEM).resolve()
-    assert (raster_b / "hydrodem.tif").exists()
-    assert gdb_b.name == f"{GDB_STEM}.gdb"
+        assert not any(p.is_symlink() for p in dam.iterdir())  # symlinks fail on Windows
+        ref = utils.read_nhdplus_ref(dam)
+        assert ref["hu4"] == HU4
+        assert ref["raster_dir"] == cache / RASTER_STEM
+        assert ref["gdb"] == cache / GDB_STEM / f"{GDB_STEM}.gdb"
+    assert raster_b == cache / RASTER_STEM and (raster_b / "hydrodem.tif").exists()
+    assert gdb_b == cache / GDB_STEM / f"{GDB_STEM}.gdb"
+
+
+def test_pointer_survives_moving_the_whole_tree(tmp_path, offline_tnm):
+    root = tmp_path / "root"
+    dam_setup.download_nhdplus_hr(HU4, root / "dams" / "x" / "inputs", cache_dir=root / "nhdplus")
+    shutil.move(root, tmp_path / "elsewhere")
+    inputs = tmp_path / "elsewhere" / "dams" / "x" / "inputs"
+    assert utils.find_nhdplus_raster_dir(inputs) == tmp_path / "elsewhere" / "nhdplus" / RASTER_STEM
+    assert utils.find_nhdplus_gdb(inputs).name == f"{GDB_STEM}.gdb"
+
+
+def test_pointer_stores_absolute_path_when_no_relative_one_exists(tmp_path, monkeypatch):
+    def other_drive(path, start=None):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(utils.os.path, "relpath", other_drive)
+    target = tmp_path / "r"
+    (tmp_path / "in").mkdir()
+    utils.write_nhdplus_ref(tmp_path / "in", raster_dir=target)
+    raw = json.loads((tmp_path / "in" / "nhdplus.json").read_text())
+    assert raw["raster_dir"] == str(target.resolve())
+
+
+def test_data_in_inputs_wins_over_pointer(tmp_path, offline_tnm):
+    inputs = tmp_path / "inputs"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=tmp_path / "cache")
+    local = inputs / "local_raster"
+    local.mkdir()
+    (local / "hydrodem.tif").write_bytes(b"")
+    assert utils.find_nhdplus_raster_dir(inputs) == local
+
+
+def test_stale_pointer_names_the_file(tmp_path):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    utils.write_nhdplus_ref(inputs, raster_dir=tmp_path / "gone", gdb=tmp_path / "gone.gdb")
+    for finder in (utils.find_nhdplus_raster_dir, utils.find_nhdplus_gdb):
+        with pytest.raises(FileNotFoundError, match="nhdplus.json"):
+            finder(inputs)
+
+
+def test_newer_cached_release_is_used(tmp_path, offline_tnm):
+    cache = tmp_path / "cache"
+    for stem in (f"NHDPLUS_H_{HU4}_HU4_20200101_RASTER", f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"):
+        (cache / stem).mkdir(parents=True)
+        (cache / stem / "hydrodem.tif").write_bytes(b"")
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache,
+                                                  products=("raster",))
+    assert raster_dir.name == f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"
+    assert offline_tnm["url_lookups"] == [] and offline_tnm["downloads"] == []
+
+
+def test_dated_cached_release_beats_undated_and_choice_is_logged(tmp_path, offline_tnm, caplog):
+    caplog.set_level("INFO")
+    cache = tmp_path / "cache"
+    for stem in (f"NHDPLUS_H_{HU4}_HU4_RASTER", f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"):
+        (cache / stem).mkdir(parents=True)
+        (cache / stem / "hydrodem.tif").write_bytes(b"")
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache,
+                                                  products=("raster",))
+    assert raster_dir.name == f"NHDPLUS_H_{HU4}_HU4_20230101_RASTER"
+    assert "cached releases" in caplog.text and f"NHDPLUS_H_{HU4}_HU4_RASTER" in caplog.text
+
+
+def test_incomplete_cached_folder_says_to_force_download(tmp_path, offline_tnm):
+    cache = tmp_path / "cache"
+    (cache / RASTER_STEM).mkdir(parents=True)  # no hydrodem.tif
+    with pytest.raises(FileNotFoundError, match="--force-download"):
+        dam_setup.download_nhdplus_hr(HU4, tmp_path / "in", cache_dir=cache, products=("raster",))
+    assert offline_tnm["downloads"] == []
+    assert (cache / RASTER_STEM).is_dir()  # nothing deleted
+
+
+def test_force_download_replaces_cached_folder(tmp_path, offline_tnm):
+    cache, inputs = tmp_path / "cache", tmp_path / "in"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, keep_zips=True)
+    (cache / RASTER_STEM / "hydrodem.tif").write_bytes(b"damaged")
+    (cache / RASTER_STEM / "stray.txt").write_text("x")
+    offline_tnm["downloads"].clear()
+    gdb, raster_dir = dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, force=True)
+    assert sorted(offline_tnm["downloads"]) == [f"{GDB_STEM}.zip", f"{RASTER_STEM}.zip"]
+    assert raster_dir == cache / RASTER_STEM
+    assert (raster_dir / "hydrodem.tif").stat().st_size > len(b"damaged")
+    assert not (raster_dir / "stray.txt").exists()
+    assert not list(cache.glob("*.partial")) and not list(cache.glob("*.zip"))
+    assert utils.read_nhdplus_ref(inputs)["raster_dir"] == raster_dir
+
+
+def test_force_download_failure_keeps_the_old_copy(tmp_path, offline_tnm, monkeypatch):
+    cache, inputs = tmp_path / "cache", tmp_path / "in"
+    dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, products=("raster",))
+
+    def broken(url, dest, size=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(dam_setup, "_download", broken)
+    with pytest.raises(OSError):
+        dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=cache, products=("raster",), force=True)
+    assert (cache / RASTER_STEM / "hydrodem.tif").exists()
+
+
+def test_force_download_refuses_data_placed_in_inputs(tmp_path, offline_tnm):
+    inputs = tmp_path / "in"
+    local = inputs / "local_raster"
+    local.mkdir(parents=True)
+    (local / "hydrodem.tif").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="move or delete it first"):
+        dam_setup.download_nhdplus_hr(HU4, inputs, cache_dir=tmp_path / "cache",
+                                      products=("raster",), force=True)
+    assert offline_tnm["downloads"] == [] and (local / "hydrodem.tif").exists()
+
+
+def test_force_download_replaces_data_extracted_into_the_dam_folder(tmp_path, offline_tnm):
+    dam_dir = tmp_path / "dam"  # cache_dir defaults to dam_dir
+    dam_setup.download_nhdplus_hr(HU4, dam_dir, products=("raster",))
+    offline_tnm["downloads"].clear()
+    _, raster_dir = dam_setup.download_nhdplus_hr(HU4, dam_dir, products=("raster",), force=True)
+    assert offline_tnm["downloads"] == [f"{RASTER_STEM}.zip"]
+    assert (raster_dir / "hydrodem.tif").exists()
 
 
 def test_download_only_requested_products(tmp_path, offline_tnm):
@@ -166,6 +515,43 @@ def test_dam_slug(label, slug):
 def test_dam_slug_empty_raises(label):
     with pytest.raises(ValueError, match="Cannot make a folder name"):
         dam_setup.dam_slug(label)
+
+
+# --- read_dam_point -----------------------------------------------------------------------
+
+def _shapefile(path, geoms, crs=4326):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    gpd.GeoDataFrame({"ID": list(range(len(geoms)))}, geometry=geoms, crs=crs).to_file(path)
+    return path
+
+
+def test_read_dam_point_reprojects_to_wgs84(tmp_path):
+    utm = gpd.GeoSeries(gpd.points_from_xy([LON], [LAT]), crs=4326).to_crs(32612)
+    shp = _shapefile(tmp_path / "dam.shp", list(utm), crs=32612)
+    assert dam_setup.read_dam_point(shp) == pytest.approx((LAT, LON))
+
+
+@pytest.mark.parametrize("geoms, message", [
+    ([Point(LON, LAT), Point(LON + 0.01, LAT)], "2 features"),
+    ([LineString([(LON, LAT), (LON + 0.01, LAT)])], "LineString"),
+    ([MultiPoint([(LON, LAT)])], "MultiPoint"),
+    ([Point(500000, 4500000)], "not a valid location"),  # UTM numbers with a WGS84 .prj
+])
+def test_read_dam_point_rejects_anything_but_one_point(tmp_path, geoms, message):
+    shp = _shapefile(tmp_path / "dam.shp", geoms)
+    with pytest.raises(ValueError, match=message):
+        dam_setup.read_dam_point(shp)
+
+
+def test_read_dam_point_needs_prj_and_shp(tmp_path):
+    shp = _shapefile(tmp_path / "dam.shp", [Point(LON, LAT)])
+    shp.with_suffix(".prj").unlink()
+    with pytest.raises(ValueError, match="no coordinate system"):
+        dam_setup.read_dam_point(shp)
+    with pytest.raises(ValueError, match="not a shapefile"):
+        dam_setup.read_dam_point(tmp_path / "dam.gpkg")
+    with pytest.raises(FileNotFoundError):
+        dam_setup.read_dam_point(tmp_path / "missing.shp")
 
 
 # --- write_dam_point / write_stage_file ----------------------------------------------------
@@ -234,3 +620,19 @@ def test_write_stage_file_default_and_keep(tmp_path):
     path.write_text("Stage\n1\n2\n")
     dam_setup.write_stage_file(tmp_path)  # existing file kept
     assert path.read_text() == "Stage\n1\n2\n"
+
+
+def test_locked_zip_after_extraction_is_a_warning(tmp_path, offline_tnm, monkeypatch, windows_locks,
+                                                  caplog):
+    real_unlink = dam_setup.Path.unlink
+
+    def locked_unlink(self, *args, **kwargs):
+        if self.suffix == ".zip":
+            raise PermissionError(32, "The process cannot access the file")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(dam_setup.Path, "unlink", locked_unlink)
+    gdb, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "dam")
+    assert gdb.exists() and (raster_dir / "hydrodem.tif").exists()
+    assert "delete it by hand" in caplog.text
+
