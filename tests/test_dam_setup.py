@@ -3,6 +3,7 @@
 import io
 import json
 import shutil
+import urllib.error
 import zipfile
 
 import geopandas as gpd
@@ -81,6 +82,112 @@ def test_nhdplus_hr_urls_missing_product(monkeypatch):
         dam_setup.nhdplus_hr_urls("0101")
 
 
+def test_get_json_retries_transient_gateway_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(url, 504, "Gateway Time-out", None, None)
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {"a": 1}) == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_get_json_does_not_retry_client_errors(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+
+    def bad(url, timeout=None):
+        raise urllib.error.HTTPError(url, 400, "Bad Request", None, None)
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", bad)
+    with pytest.raises(urllib.error.HTTPError):
+        dam_setup._get_json("http://x", {})
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timed out"), ConnectionResetError(54, "reset"),
+                                   urllib.error.URLError("temporary failure")])
+def test_get_json_retries_timeouts_and_dropped_connections(monkeypatch, error):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise error
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {}) == {"ok": True}
+    assert calls["n"] == 2
+
+
+def test_get_json_retries_a_timeout_while_reading(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    class SlowBody(io.BytesIO):
+        def read(self, *args):
+            raise TimeoutError("read timed out")
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        return SlowBody() if calls["n"] == 1 else io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._get_json("http://x", {}) == {"ok": True}
+
+
+def test_get_json_gives_up_after_three_timeouts(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def down(url, timeout=None):
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", down)
+    with pytest.raises(TimeoutError):
+        dam_setup._get_json("http://x", {})
+    assert calls["n"] == 3
+
+
+def test_retried_http_error_is_closed(monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    errors = []
+
+    def flaky(url, timeout=None):
+        if not errors:
+            errors.append(urllib.error.HTTPError(url, 503, "Unavailable", None, io.BytesIO(b"x")))
+            raise errors[0]
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    dam_setup._get_json("http://x", {})
+    assert errors[0].fp is None or errors[0].fp.closed
+
+
+def test_download_retries_a_gateway_error_on_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(dam_setup.time, "sleep", lambda _: None)
+    real_urlopen = dam_setup.urllib.request.urlopen
+    src = tmp_path / "src.zip"
+    src.write_bytes(b"zipdata")
+    calls = {"n": 0}
+
+    def flaky(url, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError(url, 503, "Slow Down", None, None)
+        return real_urlopen(url, timeout=timeout)
+
+    monkeypatch.setattr(dam_setup.urllib.request, "urlopen", flaky)
+    assert dam_setup._download(src.as_uri(), tmp_path / "out.zip").read_bytes() == b"zipdata"
+    assert calls["n"] == 2
+
+
 # --- _extract ------------------------------------------------------------------------------
 
 def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
@@ -102,6 +209,121 @@ def test_extract_flattens_wrapper_folder_and_skips_macosx(tmp_path):
     assert not (target / "__MACOSX").exists()
     assert not (target / "leftover").exists()
     assert not stale.exists()
+
+
+@pytest.fixture
+def windows_locks(monkeypatch):
+    """Turn on the Windows-only lock retries, with no real waiting."""
+    monkeypatch.setattr(dam_setup, "RETRY_FILE_LOCKS", True)
+    sleeps = []
+    monkeypatch.setattr(dam_setup.time, "sleep", sleeps.append)
+    return sleeps
+
+
+def _locked(times):
+    """An action raising a WinError-5-like PermissionError the first `times` calls."""
+    state = {"calls": 0}
+
+    def action():
+        state["calls"] += 1
+        if state["calls"] <= times:
+            raise PermissionError(5, "Access is denied")
+        return "done"
+    return action, state
+
+
+def test_retry_on_lock_retries_on_windows_with_growing_waits(windows_locks):
+    action, state = _locked(3)
+    assert dam_setup._retry_on_lock(action, "Renaming x") == "done"
+    assert state["calls"] == 4
+    assert windows_locks == [1, 2, 4]
+
+
+def test_retry_on_lock_gives_up_after_the_last_attempt(windows_locks):
+    action, state = _locked(99)
+    with pytest.raises(PermissionError):
+        dam_setup._retry_on_lock(action, "Renaming x", attempts=3)
+    assert state["calls"] == 3
+
+
+def test_retry_on_lock_does_not_retry_off_windows(monkeypatch):
+    monkeypatch.setattr(dam_setup, "RETRY_FILE_LOCKS", False)
+    monkeypatch.setattr(dam_setup.time, "sleep",
+                        lambda _: (_ for _ in ()).throw(AssertionError("waited off Windows")))
+    action, state = _locked(1)
+    with pytest.raises(PermissionError):
+        dam_setup._retry_on_lock(action, "Renaming x")
+    assert state["calls"] == 1  # a real permission problem fails at once, as before
+
+
+def test_retry_on_lock_does_not_retry_other_errors(windows_locks):
+    def missing():
+        raise FileNotFoundError("gone")
+    with pytest.raises(FileNotFoundError):
+        dam_setup._retry_on_lock(missing, "Renaming x")
+    assert windows_locks == []
+
+
+def test_extract_retries_rename_blocked_by_transient_lock(tmp_path, monkeypatch, windows_locks):
+    zip_path = tmp_path / "X_RASTER.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("hydrodem.tif", b"tif")
+    target = tmp_path / "X_RASTER"
+
+    real_rename = dam_setup.Path.rename
+    state = {"failures": 2}
+
+    def flaky_rename(self, dst):
+        if state["failures"] and self.suffix == ".partial":
+            state["failures"] -= 1
+            raise PermissionError(5, "Access is denied")  # WinError 5
+        return real_rename(self, dst)
+
+    monkeypatch.setattr(dam_setup.Path, "rename", flaky_rename)
+
+    dam_setup._extract(zip_path, target)
+
+    assert (target / "hydrodem.tif").read_bytes() == b"tif"
+    assert state["failures"] == 0
+
+
+def test_extract_retries_removing_a_locked_stale_partial(tmp_path, monkeypatch, windows_locks):
+    zip_path = tmp_path / "X_RASTER.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("hydrodem.tif", b"tif")
+    stale = tmp_path / "X_RASTER.partial"
+    stale.mkdir()
+    real_rmtree = dam_setup.shutil.rmtree
+    state = {"failures": 1}
+
+    def flaky_rmtree(path, *args, **kwargs):
+        if state["failures"]:
+            state["failures"] -= 1
+            raise PermissionError(32, "The process cannot access the file")  # WinError 32
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(dam_setup.shutil, "rmtree", flaky_rmtree)
+    dam_setup._extract(zip_path, tmp_path / "X_RASTER")
+    assert (tmp_path / "X_RASTER" / "hydrodem.tif").exists()
+    assert state["failures"] == 0
+
+
+def test_download_retries_rename_of_part_file(tmp_path, monkeypatch, windows_locks):
+    src = tmp_path / "src.zip"
+    src.write_bytes(b"zipdata")
+    real_rename = dam_setup.Path.rename
+    state = {"failures": 2}
+
+    def flaky_rename(self, dst):
+        if state["failures"] and self.suffix == ".part":
+            state["failures"] -= 1
+            raise PermissionError(5, "Access is denied")
+        return real_rename(self, dst)
+
+    monkeypatch.setattr(dam_setup.Path, "rename", flaky_rename)
+    dest = dam_setup._download(src.as_uri(), tmp_path / "out.zip")
+    assert dest.read_bytes() == b"zipdata"
+    assert not (tmp_path / "out.zip.part").exists()
 
 
 # --- download_nhdplus_hr -----------------------------------------------------------------
@@ -398,3 +620,19 @@ def test_write_stage_file_default_and_keep(tmp_path):
     path.write_text("Stage\n1\n2\n")
     dam_setup.write_stage_file(tmp_path)  # existing file kept
     assert path.read_text() == "Stage\n1\n2\n"
+
+
+def test_locked_zip_after_extraction_is_a_warning(tmp_path, offline_tnm, monkeypatch, windows_locks,
+                                                  caplog):
+    real_unlink = dam_setup.Path.unlink
+
+    def locked_unlink(self, *args, **kwargs):
+        if self.suffix == ".zip":
+            raise PermissionError(32, "The process cannot access the file")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(dam_setup.Path, "unlink", locked_unlink)
+    gdb, raster_dir = dam_setup.download_nhdplus_hr(HU4, tmp_path / "dam")
+    assert gdb.exists() and (raster_dir / "hydrodem.tif").exists()
+    assert "delete it by hand" in caplog.text
+

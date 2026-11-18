@@ -21,9 +21,12 @@ not a console script itself. The uniform-flow forecast helper, ``write_uniform_f
 
 import json
 import logging
+import os
 import re
 import shutil
+import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -44,12 +47,49 @@ NHDPLUS_HR_PRODUCTS = {"gdb": "GDB", "raster": "Raster"}
 DEFAULT_STAGES = [0.1, 0.2, 0.5, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35, 40]
 
 HTTP_TIMEOUT = 120  # seconds
+RETRYABLE_HTTP_CODES = (502, 503, 504)  # transient gateway/server errors
+
+# Retry file operations blocked by a transient lock only on Windows, where antivirus and the
+# search indexer briefly open new files and block renaming/deleting them. Elsewhere a
+# PermissionError is a real permission problem, so it is raised at once.
+RETRY_FILE_LOCKS = os.name == "nt"
+# WinError 5 (access denied), 32 (sharing violation), 145 (directory not empty: a scanner
+# still has a file open inside a folder being removed)
+_LOCK_WINERRORS = (5, 32, 145)
+
+
+def _with_network_retry(fetch, url, attempts=3, delay=5.0):
+    """
+    Return fetch(), retrying transient network failures: HTTP 502/503/504 (the USGS services
+    occasionally answer a good request with these), timeouts, dropped/reset connections
+    and other URLErrors. Other HTTP errors (e.g. 404) are raised at once.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch()
+        except urllib.error.HTTPError as e:  # before URLError: HTTPError is a subclass
+            if e.code not in RETRYABLE_HTTP_CODES or attempt == attempts:
+                raise
+            e.close()  # release the error response's connection before retrying
+            reason = f"HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == attempts:
+                raise
+            reason = f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+        logger.warning(f"{reason} from {url} (attempt {attempt}/{attempts}); retrying in {delay:.0f} s")
+        time.sleep(delay)
+
+
+def _read_url(url):
+    """The body of url, retrying transient failures of both the request and the read."""
+    def fetch():
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
+            return response.read()
+    return _with_network_retry(fetch, url)
 
 
 def _get_json(url, params):
-    full_url = f"{url}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(full_url, timeout=HTTP_TIMEOUT) as response:
-        return json.load(response)
+    return json.loads(_read_url(f"{url}?{urllib.parse.urlencode(params)}"))
 
 
 def find_hu4_for_point(lat, lon):
@@ -85,8 +125,7 @@ def nhdplus_hr_urls(hu4):
     for key, folder in NHDPLUS_HR_PRODUCTS.items():
         prefix = f"{NHDPLUS_HR_PREFIX}/{folder}/NHDPLUS_H_{hu4}_HU4"
         listing_url = f"{TNM_BUCKET_URL}/?{urllib.parse.urlencode({'list-type': 2, 'prefix': prefix})}"
-        with urllib.request.urlopen(listing_url, timeout=HTTP_TIMEOUT) as response:
-            xml = response.read().decode()
+        xml = _read_url(listing_url).decode()
         zips = [(k, int(s)) for k, s in
                 re.findall(r"<Key>([^<]+\.zip)</Key>.*?<Size>(\d+)</Size>", xml, re.S)]
         if not zips:
@@ -101,7 +140,9 @@ def _download(url, dest, size=None):
     dest = Path(dest)
     tmp = dest.with_suffix(dest.suffix + ".part")
     logger.info(f"Downloading {url} ({size / 1e9:.2f} GB)" if size else f"Downloading {url}")
-    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response, open(tmp, "wb") as out:
+    # Only opening the request is retried; a failure mid-stream needs a rerun.
+    response = _with_network_retry(lambda: urllib.request.urlopen(url, timeout=HTTP_TIMEOUT), url)
+    with response, open(tmp, "wb") as out:
         total = size or int(response.headers.get("Content-Length", 0))
         done, next_report = 0, 0.05
         while chunk := response.read(1 << 20):
@@ -113,7 +154,8 @@ def _download(url, dest, size=None):
     if total and done != total:
         tmp.unlink()
         raise OSError(f"Download of {url} stopped at {done} of {total} bytes; rerun to retry")
-    tmp.rename(dest)
+    # antivirus usually opens a large new file to scan it, blocking the rename on Windows
+    _retry_on_lock(lambda: tmp.rename(dest), f"Renaming {tmp.name} to {dest.name}")
     return dest
 
 
@@ -131,7 +173,7 @@ def _extract(zip_path, target_dir):
     partial = target_dir.with_name(target_dir.name + ".partial")
     if partial.exists():
         logger.info(f"Removing incomplete extraction {partial}")
-        shutil.rmtree(partial)
+        _retry_on_lock(lambda: shutil.rmtree(partial), f"Removing {partial.name}")
     partial.mkdir(parents=True)
     logger.info(f"Extracting {zip_path.name} to {target_dir}")
     with zipfile.ZipFile(zip_path) as z:
@@ -140,11 +182,48 @@ def _extract(zip_path, target_dir):
     nested = partial / target_dir.name
     if nested.is_dir():
         for item in nested.iterdir():
-            shutil.move(str(item), partial / item.name)
-        nested.rmdir()
+            _retry_on_lock(lambda item=item: shutil.move(str(item), partial / item.name),
+                           f"Moving {item.name} out of {nested.name}")
+        _retry_on_lock(nested.rmdir, f"Removing {nested.name}")
     if target_dir.exists():  # only reached when replacing (--force-download), after a good extraction
-        shutil.rmtree(target_dir)
-    partial.rename(target_dir)
+        _retry_on_lock(lambda: shutil.rmtree(target_dir), f"Removing the old {target_dir.name}")
+    _retry_on_lock(lambda: partial.rename(target_dir), f"Renaming {partial.name} to {target_dir.name}")
+
+
+def _is_transient_lock(error):
+    return isinstance(error, PermissionError) or getattr(error, "winerror", None) in _LOCK_WINERRORS
+
+
+def _retry_on_lock(action, description, attempts=6, delay=1.0):
+    """
+    Return action(), retrying on Windows while a file is locked: antivirus and the search
+    indexer briefly open freshly downloaded or extracted files, which blocks renaming and
+    deleting them (WinError 5/32). Waits double each time (1, 2, 4, 8, 16 s: about 30 s in
+    all). Elsewhere (RETRY_FILE_LOCKS false) the action runs once and any error is raised.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except OSError as e:
+            if not (RETRY_FILE_LOCKS and _is_transient_lock(e)) or attempt == attempts:
+                raise
+            wait = delay * 2 ** (attempt - 1)
+            logger.warning(f"{description} was blocked, probably by antivirus or the search "
+                           f"indexer scanning it (attempt {attempt}/{attempts}); "
+                           f"retrying in {wait:.0f} s")
+            time.sleep(wait)
+
+
+def _remove_zip(zip_path):
+    """
+    Delete a zip after extraction. The data is already extracted, so a zip that stays
+    locked is only reported, not an error.
+    """
+    try:
+        _retry_on_lock(zip_path.unlink, f"Deleting {zip_path.name}")
+    except OSError as e:
+        logger.warning(f"Could not delete {zip_path} ({e}); the data is extracted, "
+                       "so you can delete it by hand")
 
 
 def _release_key(folder):
@@ -250,17 +329,21 @@ def download_nhdplus_hr(hu4, dam_dir, cache_dir=None, keep_zips=False, products=
                 logger.warning(f"Only {free / 1e9:.1f} GB free in {cache_dir}; "
                                f"{zip_name} needs about {3 * size / 1e9:.1f} GB")
             zip_path = cache_dir / zip_name
-            if force:
-                zip_path.unlink(missing_ok=True)  # a kept zip may be the stale copy
+            if force:  # a kept zip may be the stale copy
+                _retry_on_lock(lambda: zip_path.unlink(missing_ok=True), f"Deleting {zip_path.name}")
             if not zip_path.exists():
                 _download(url, zip_path, size)
             try:
                 _extract(zip_path, extracted)
             except zipfile.BadZipFile:
-                zip_path.unlink()  # corrupt: download again next time
+                try:  # corrupt: download again next time
+                    _retry_on_lock(zip_path.unlink, f"Deleting the corrupt {zip_path.name}")
+                except OSError as e:
+                    logger.error(f"Could not delete the corrupt {zip_path} ({e}); delete it "
+                                 "before rerunning, or it will be extracted again")
                 raise
             if not keep_zips:
-                zip_path.unlink()
+                _remove_zip(zip_path)
         if cache_dir != dam_dir:
             path = _product_path(extracted, key)
             write_nhdplus_ref(dam_dir, hu4=hu4, **{"gdb" if key == "gdb" else "raster_dir": path})

@@ -707,7 +707,8 @@ def parse_arguments():
                        help="Download the NHDPlus HR data again and replace the copy in the cache, "
                             "even if the dam already has it (not for --huc12-gdb/--raster-dir "
                             "products). Fails if the data sits directly in inputs/; move it first. "
-                            "Other dams sharing the cache folder see the new copy")
+                            "Other dams sharing the cache folder see the new copy. The HU4 recorded in "
+                            "nhdplus.json is looked up again (or taken from --hu4)")
 
     parser.add_argument(
         "--huc12-gdb",
@@ -812,6 +813,26 @@ def validate_setup_arguments(parser, args):
         parser.error(f"--hu4 must be a 4-digit HUC code, got {args.hu4!r}")
 
 
+def _recorded_hu4(inputs, force_download):
+    """
+    The HU4 recorded in inputs/nhdplus.json, or None when there is none, when it is not a
+    4-digit string (e.g. a hand-edited 101 for "0101"), or with --force-download (so a
+    wrong recorded HU4 can be replaced).
+    """
+    recorded = read_nhdplus_ref(inputs).get("hu4")
+    if recorded is None:
+        return None
+    ref = inputs / NHDPLUS_REF_FILE
+    if force_download:
+        logger.info(f"--force-download: not reusing HU4 {recorded} recorded in {ref}")
+        return None
+    if not (isinstance(recorded, str) and recorded.isdigit() and len(recorded) == 4):
+        logger.warning(f"Ignoring HU4 {recorded!r} recorded in {ref}: not a 4-digit HUC code "
+                       "in quotes (e.g. \"0101\"); looking it up again")
+        return None
+    return recorded
+
+
 def prepare_dam_dir(args, dam_dir):
     """
     Fill <dam_dir>/inputs from --dam-lat/--dam-lon or --dam-shapefile: dam point, default
@@ -823,8 +844,11 @@ def prepare_dam_dir(args, dam_dir):
     stages find it, unless it already is a *dam_location.shp in inputs/; then it is used as is.
 
     Data already available (in inputs/ or through inputs/nhdplus.json) is used without any
-    network access, so reruns work offline (unless --force-download). An explicit --hu4 that disagrees with the HU4
-    recorded in nhdplus.json is an error.
+    network access, so reruns work offline (unless --force-download); a HU4 recorded in
+    nhdplus.json is reused instead of querying the WBD service again. An explicit --hu4
+    that disagrees with the HU4 recorded in nhdplus.json is an error. With --force-download
+    the recorded HU4 is ignored (looked up again, or --hu4), so a wrong one can be replaced;
+    a recorded value that is not a 4-digit code is ignored with a warning.
     """
     inputs = dam_dir / INPUTS_DIR_NAME
     dam_shapefile = None
@@ -841,11 +865,12 @@ def prepare_dam_dir(args, dam_dir):
         dam_shapefile = write_dam_point(inputs, lat, lon, args.dam_name or dam_dir.name,
                                         label=args.dam_label and args.dam_label.strip())
     write_stage_file(inputs)  # default stages; keeps an existing stage.txt
-    recorded = read_nhdplus_ref(inputs).get("hu4")
-    if args.hu4 and recorded and str(recorded) != args.hu4:
+    recorded = _recorded_hu4(inputs, args.force_download)
+    if args.hu4 and recorded and recorded != args.hu4:
         raise ValueError(
             f"{inputs / NHDPLUS_REF_FILE} points to NHDPlus HR HU4 {recorded}, but --hu4 "
-            f"{args.hu4} was given. Delete that file (or fix --hu4) to use HU4 {args.hu4}; "
+            f"{args.hu4} was given. Add --force-download (or delete that file, or fix --hu4) "
+            f"to use HU4 {args.hu4}; "
             "nothing is changed automatically so a rerun cannot silently switch data.")
     products = []
     for key, override, finder in (("gdb", args.huc12_gdb, find_nhdplus_gdb),
@@ -860,7 +885,7 @@ def prepare_dam_dir(args, dam_dir):
                     products.append(key)
     if not products:
         return dam_shapefile, None
-    hu4 = args.hu4 or find_hu4_for_point(lat, lon)
+    hu4 = args.hu4 or recorded or find_hu4_for_point(lat, lon)
     cache_dir = args.nhd_cache_dir or default_nhd_cache_dir(dam_dir)
     logger.info(f"NHDPlus HR cache: {cache_dir}")
     download_nhdplus_hr(hu4, inputs, cache_dir=cache_dir, keep_zips=args.keep_zips,
